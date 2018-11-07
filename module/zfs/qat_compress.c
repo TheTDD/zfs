@@ -45,7 +45,7 @@
  * and session arrays, the actual number of instances are defined in
  * the QAT driver's configure file.
  */
-#define	MAX_INSTANCES		64
+// #define	MAX_INSTANCES		64
 
 /*
  * ZLIB head and foot size
@@ -127,8 +127,6 @@ typedef struct qat_stats {
 
 	kstat_named_t err_gen_header;
 	kstat_named_t err_timeout;
-	kstat_named_t err_size_mismatch;
-	kstat_named_t err_no_space_header;
 	kstat_named_t err_gen_footer;
 	kstat_named_t err_too_big_result;
 
@@ -163,8 +161,6 @@ qat_stats_t qat_stats = {
 
 	{ "err_gen_header",                     KSTAT_DATA_UINT64 },
         { "err_timeout",                        KSTAT_DATA_UINT64 },
-        { "err_size_mismatch",                  KSTAT_DATA_UINT64 },
-        { "err_no_space_header",                KSTAT_DATA_UINT64 },
         { "err_gen_footer",                     KSTAT_DATA_UINT64 },
 	{ "err_too_big_result",                 KSTAT_DATA_UINT64 },
 
@@ -218,21 +214,6 @@ static atomic_t instNum = ATOMIC_INIT(0);
 #define	PHYS_CONTIG_FREE(p_mem_addr)	\
 	mem_free_contig((void *)&(p_mem_addr))
 
-static inline struct page *
-mem_to_page(void *addr)
-{
-	if (!is_vmalloc_addr(addr))
-		return (virt_to_page(addr));
-
-	return (vmalloc_to_page(addr));
-}
-
-static void
-qat_dc_callback(CpaDcDpOpData *pOpData)
-{
-    complete((struct completion *)pOpData->pCallbackTag);
-}
-
 static inline CpaStatus
 mem_alloc_contig(void **ppMemAddr, Cpa32U sizeBytes, Cpa32U alignment)
 {
@@ -244,14 +225,14 @@ mem_alloc_contig(void **ppMemAddr, Cpa32U sizeBytes, Cpa32U alignment)
     {
 	return CPA_STATUS_RESOURCE;
     }
-    
+
     *ppMemAddr = pAlloc + sizeof(void *);
     align = ((ADDR_LEN)(*ppMemAddr)) % alignment;
-    
+
     *ppMemAddr += (alignment - align);
     *(ADDR_LEN *)(*ppMemAddr - sizeof(void *)) = (ADDR_LEN)pAlloc;
-    
-    return CPA_STATUS_SUCCESS;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  return CPA_STATUS_SUCCESS;
+
+    return CPA_STATUS_SUCCESS;
 }
 
 
@@ -280,7 +261,6 @@ qat_init(void)
 	}
 
 	return 0;
-
 }
 
 void
@@ -496,6 +476,14 @@ register_op_status(CpaStatus status) {
     }
 }
 
+static void
+qat_dc_callback(CpaDcDpOpData *pOpData)
+{
+    if (pOpData->pCallbackTag != NULL) {
+        complete((struct completion *)pOpData->pCallbackTag);
+    }
+}
+
 static CpaStatus
 getInstance(CpaInstanceHandle *instance) {
 
@@ -503,7 +491,7 @@ getInstance(CpaInstanceHandle *instance) {
     Cpa16U num_inst = 0;
     int i = 0;
 
-    CpaInstanceHandle handles[MAX_INSTANCES] = {NULL};
+    CpaInstanceHandle *handles = NULL;
 
     status = cpaDcGetNumInstances(&num_inst);
     if (status != CPA_STATUS_SUCCESS || num_inst == 0) {
@@ -512,8 +500,11 @@ getInstance(CpaInstanceHandle *instance) {
             goto done;
     }
 
-    if (num_inst > MAX_INSTANCES)
-        num_inst = MAX_INSTANCES;
+    status = PHYS_CONTIG_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
+    if (status != CPA_STATUS_SUCCESS) {
+            printk(KERN_ERR LOG_PREFIX "failed allocate space for instances, status=%d, num_inst=%d\n", status, num_inst);
+            goto done;
+    }
 
     status = cpaDcGetInstances(num_inst, handles);
     if (status != CPA_STATUS_SUCCESS) {
@@ -530,6 +521,8 @@ getInstance(CpaInstanceHandle *instance) {
     *instance = handles[i];
 
 done:
+
+    PHYS_CONTIG_FREE(handles);
 
     return status;
 
