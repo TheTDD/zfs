@@ -50,25 +50,42 @@ typedef uLongf zlen_t;
 
 #endif
 
+#include "qat_compress.h"
+
 size_t
 gzip_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 {
 	zlen_t dstlen = d_len;
+	qat_compress_status_t qatStatus;
 
 	ASSERT(d_len <= s_len);
 
 	/* check if hardware accelerator can be used */
-	if (qat_use_accel(QAT_COMPRESS, s_len)) {
-		if (qat_compress(QAT_COMPRESS, n, s_start, s_len, d_start, d_len, &dstlen))
+	if (qat_use_accel(QAT_COMPRESS, s_len)) 
+	{
+		qatStatus = qat_compress(QAT_COMPRESS, n, s_start, s_len, d_start, d_len, &dstlen);
+		switch (qatStatus) 
+		{
+		    case QAT_COMPRESS_SUCCESS:
 			return ((size_t)dstlen);
+
+		    case QAT_COMPRESS_UNCOMPRESSIBLE:
+			memmove(d_start, s_start, s_len);
+			return (s_len);
+
+		    default:
+			// continue with software compression
+			break;
+		}
 		/* if hardware compress fail, do it again with software */
 	}
 
-	if (compress_func(d_start, &dstlen, s_start, s_len, n) != Z_OK) {
+	if (compress_func(d_start, &dstlen, s_start, s_len, n) != Z_OK) 
+	{
 		if (d_len != s_len)
 			return (s_len);
 
-		bcopy(s_start, d_start, s_len);
+		memmove(d_start, s_start, s_len);
 		return (s_len);
 	}
 
@@ -80,13 +97,23 @@ int
 gzip_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 {
 	zlen_t dstlen = d_len;
+	qat_compress_status_t qatStatus;
 
 	ASSERT(d_len >= s_len);
 
 	/* check if hardware accelerator can be used */
-	if (qat_use_accel(QAT_DECOMPRESS, d_len)) {
-		if (qat_compress(QAT_DECOMPRESS, n, s_start, s_len, d_start, d_len, &dstlen))
+	if (qat_use_accel(QAT_DECOMPRESS, d_len)) 
+	{
+		qatStatus = qat_compress(QAT_DECOMPRESS, n, s_start, s_len, d_start, d_len, &dstlen);
+		switch (qatStatus) 
+		{
+		    case QAT_COMPRESS_SUCCESS:
 			return (0);
+
+		    default:
+			// continue with software
+			break;
+		}
 		/* if hardware de-compress fail, do it again with software */
 	}
 

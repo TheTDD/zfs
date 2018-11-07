@@ -34,9 +34,9 @@
 #include "qat_cnv_utils.h"
 
 /*
- * Timeout - no response from hardware after 1 - 5 seconds
+ * Timeout - no response from hardware after 0.5 - 5 seconds
  */
-#define	TIMEOUT_MS_MIN		1000
+#define	TIMEOUT_MS_MIN		500
 #define TIMEOUT_MS_MAX		5000
 
 /*
@@ -70,8 +70,8 @@
 #define	QAT_MAX_BUF_SIZE_COMP	(128*1024)
 #define QAT_MAX_BUF_SIZE_DECOMP (1024*1024)
 
-#define SAMPLE_MAX_BUFF 1024
-#define SINGLE_INTER_BUFFLIST 1
+// #define SAMPLE_MAX_BUFF 1024
+// #define SINGLE_INTER_BUFFLIST 1
 
 #define LOG_PREFIX "ZFS-QAT: "
 
@@ -484,12 +484,21 @@ qat_dc_callback(CpaDcDpOpData *pOpData)
     }
 }
 
+// TODO:
+// WARNING: it is not allowed to use "polled" instances because they don't generate interrupt for timeout
+// the polled status can be read by
+// cpaDcInstanceGetInfo2 ( const CpaInstanceHandle instanceHandle, CpaInstanceInfo2 * pInstanceInfo2)
+// then pInstanceInfo2.isPolled
+
 static CpaStatus
 getInstance(CpaInstanceHandle *instance) {
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa16U num_inst = 0;
     int i = 0;
+    boolean_t instanceFound = B_FALSE;
+    int cinst = 0;
+    CpaInstanceInfo2 instanceInfo = {0};
 
     CpaInstanceHandle *handles = NULL;
 
@@ -514,11 +523,25 @@ getInstance(CpaInstanceHandle *instance) {
 
     // get next instance
     // provide strong thread/smp safe rotation of instances
-    smp_mb__before_atomic();
-    i = atomic_inc_return(&instNum) % num_inst;
-    smp_mb__after_atomic();
+    for (cinst = 0; cinst < num_inst; cinst++) {
+	smp_mb__before_atomic();
+	i = atomic_inc_return(&instNum) % num_inst;
+	smp_mb__after_atomic();
+	status = cpaDcInstanceGetInfo2(handles[i], &instanceInfo);
+	if (CPA_STATUS_SUCCESS == status) {
+	    if (!instanceInfo.isPolled) {
+		instanceFound = B_TRUE;
+		break;
+	    }
+	}
+    }
 
-    *instance = handles[i];
+    if (instanceFound) {
+        *instance = handles[i];
+    } else {
+        printk(KERN_ALERT LOG_PREFIX "none of %d instances is in interrupt mode (polled=0)\n", num_inst);
+	status = CPA_STATUS_FAIL;
+    }
 
 done:
 
@@ -531,14 +554,16 @@ done:
 /*
  * This function performs a decompression operation.
  */
-static boolean_t 
+static qat_compress_status_t
 compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl, 
     const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
+    qat_compress_status_t ret = QAT_COMPRESS_FAIL;
+
     struct completion complete = {0};
     unsigned long timeout = 0;
-    boolean_t ret = B_FALSE;
+    struct timespec time = {0};
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaPhysBufferList *pBufferListSrc = NULL;
@@ -556,7 +581,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     Cpa32U foot_sz = 0;
     Cpa32U compressed_sz = 0;
 
-    printk(KERN_ALERT LOG_PREFIX "just inform, compress %d to %d bytes\n", src_len, dest_len);
+    // printk(KERN_ALERT LOG_PREFIX "just inform, compress %d to %d bytes\n", src_len, dest_len);
 
     QAT_STAT_BUMP(comp_requests);
     QAT_STAT_INCR(comp_total_in_bytes, src_len);
@@ -653,9 +678,10 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     {
 	// wait for bigger packets longer but at lease 0.5 sec
         timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dest_len / QAT_MAX_BUF_SIZE_COMP;
+        time.tv_nsec = timeout * 1000000L;
 
         /* we now wait until the completion of the operation. */
-        if (!wait_for_completion_interruptible_timeout(&complete, timeout)) {
+        if (!wait_for_completion_interruptible_timeout(&complete, timespec_to_jiffies(&time))) {
                 QAT_STAT_BUMP(err_timeout);
                 printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
                 status = CPA_STATUS_FAIL;
@@ -668,10 +694,22 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     {
         if (pOpData->responseStatus != CPA_STATUS_SUCCESS)
         {
-	    register_error_status(pOpData->responseStatus);
-            printk(KERN_ERR LOG_PREFIX
-                "status from compression operation failed. (status = %d)\n",
-                pOpData->responseStatus);
+	    // overflow is normal condition, don't interpret as failure
+	    if (pOpData->results.status == CPA_DC_OVERFLOW) {
+                
+                register_op_status(pOpData->results.status);
+                // printk(KERN_ERR LOG_PREFIX "status=%d and results status is overflow (op_status = %d), probably should set UNCOMPRESSIBLE here\n",
+                //          pOpData->results.status);
+                ret = QAT_COMPRESS_UNCOMPRESSIBLE;
+	    
+	    } else {
+		
+		register_error_status(pOpData->responseStatus);
+        	printk(KERN_ERR LOG_PREFIX "status from compression operation failed. (status = %d)\n",
+            	    pOpData->responseStatus);
+	    
+	    }
+
             status = CPA_STATUS_FAIL;
         }
         else
@@ -694,6 +732,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
             		QAT_STAT_BUMP(err_too_big_result);
             		printk(KERN_ERR LOG_PREFIX "compression of %d produced output of %d (+%d header) bytes but output buffer is only %d\n", 
 				src_len, pOpData->results.produced, hdr_sz, dest_len);
+
+			ret = QAT_COMPRESS_UNCOMPRESSIBLE;
             		status = CPA_STATUS_FAIL;
 
         	} else {
@@ -726,7 +766,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
     if (CPA_STATUS_SUCCESS == status) 
     {
-	foot_sz = pOpData->results.produced;
+	// compressed data + footer
+	foot_sz = pOpData->results.produced - compressed_sz;
 
 	if (hdr_sz + compressed_sz + foot_sz > dest_len) {
 
@@ -734,6 +775,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
             printk(KERN_ERR LOG_PREFIX "compression of %d produced output of %d (+%d header, +%d footer) bytes but output buffer is only %d\n", 
 			src_len, compressed_sz, hdr_sz, foot_sz, dest_len);
 
+	    ret = QAT_COMPRESS_UNCOMPRESSIBLE;
 	    status = CPA_STATUS_FAIL;
 
 	} else {
@@ -741,14 +783,14 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	    // copy compression result to destination
 	    memcpy(&dest[0], 	  			headerBuf.pData, 	hdr_sz);
 	    memcpy(&dest[hdr_sz], 			pDstBuffer, 		compressed_sz);
-	    memcpy(&dest[hdr_sz + compressed_sz],	footerBuf.pData, 	foot_sz);
+	    memcpy(&dest[hdr_sz + compressed_sz],       footerBuf.pData,        foot_sz);
 
 	    // save size of compressed data
 	    *c_len = hdr_sz + compressed_sz + foot_sz;
 
 	    QAT_STAT_INCR(comp_total_out_bytes, *c_len);
 
-	    ret = B_TRUE;
+	    ret = QAT_COMPRESS_SUCCESS;
 	}
 
     }
@@ -775,26 +817,30 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 /*
  * This function performs a decompression operation.
  */
-static boolean_t 
+static qat_compress_status_t
 decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl, 
     const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
+    qat_compress_status_t ret = QAT_COMPRESS_FAIL;
+
     struct completion complete = {0};
     unsigned long timeout = 0;
-    boolean_t ret = B_FALSE;
+    struct timespec time = {0};
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaPhysBufferList *pBufferListSrc = NULL;
     CpaPhysBufferList *pBufferListDst = NULL;
-    Cpa32U bufferSize = dest_len;
+    // For decompression operations, the minimal destination buffer size should be
+    // 258 bytes.
+    Cpa32U bufferSize = max(258L, (long)dest_len);
     Cpa32U numBuffers = 1;
     Cpa32U bufferListMemSize = 0;
     Cpa8U *pSrcBuffer = NULL;
     Cpa8U *pDstBuffer = NULL;
     CpaDcDpOpData *pOpData = NULL;
 
-    printk(KERN_ALERT LOG_PREFIX "just inform, decompress %d to %d bytes\n", src_len, dest_len);
+    // printk(KERN_ALERT LOG_PREFIX "just inform, decompress %d to %d bytes\n", src_len, dest_len);
 
     QAT_STAT_BUMP(decomp_requests);
     QAT_STAT_INCR(decomp_total_in_bytes, src_len);
@@ -879,9 +925,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
     {
 	// wait for bigger packets longer but at lease 0.5 sec
         timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dest_len / QAT_MAX_BUF_SIZE_DECOMP;
+	time.tv_nsec = timeout * 1000000L;
 
         /* we now wait until the completion of the operation. */
-        if (!wait_for_completion_interruptible_timeout(&complete, timeout)) {
+        if (!wait_for_completion_interruptible_timeout(&complete, timespec_to_jiffies(&time))) {
                 QAT_STAT_BUMP(err_timeout);
                 printk(KERN_WARNING LOG_PREFIX "timeout for decompression of %d to %d bytes\n", src_len, dest_len);
                 status = CPA_STATUS_FAIL;
@@ -897,6 +944,8 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	    register_error_status(pOpData->responseStatus);
             printk(KERN_ERR LOG_PREFIX "status from decompression operation failed. (status = %d)\n",
                 pOpData->responseStatus);
+
+
             status = CPA_STATUS_FAIL;
         }
         else
@@ -931,7 +980,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 
             		QAT_STAT_INCR(decomp_total_out_bytes, *c_len);
 
-            		ret = B_TRUE;
+            		ret = QAT_COMPRESS_SUCCESS;
         	}
 		
             }
@@ -977,12 +1026,12 @@ static inline CpaDcCompLvl compLevel(int level) {
 * QAT Compression/Decompression
 *
 *************************************************************************/
-static boolean_t 
-qat_action( boolean_t (*func)(const CpaInstanceHandle, const CpaDcSessionHandle, const char*, const int, char*, const int, size_t*),
+static qat_compress_status_t 
+qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSessionHandle, const char*, const int, char*, const int, size_t*),
     const int level, const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
-    boolean_t ret = B_FALSE;
+    qat_compress_status_t ret = QAT_COMPRESS_FAIL;
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaDcInstanceCapabilities cap = {0};
@@ -1203,20 +1252,20 @@ failed:
 }
 
 
-boolean_t
+qat_compress_status_t
 qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len, char *dest, int dest_len, size_t *c_len) {
 
-    boolean_t ret = B_FALSE;
+    qat_compress_status_t ret = QAT_COMPRESS_FAIL;
 
     switch (dir) {
-        
+
         case QAT_COMPRESS:
-	    printk(KERN_ALERT LOG_PREFIX "just info, requested to compress %d bytes to buffer size %d\n", src_len, dest_len);
+	    // printk(KERN_ALERT LOG_PREFIX "just info, requested to compress %d bytes to buffer size %d\n", src_len, dest_len);
             ret = qat_action(compPerformOp, level, src, src_len, dest, dest_len, c_len);
             break;
-            
+
         case QAT_DECOMPRESS:
-	    printk(KERN_ALERT LOG_PREFIX "just info, requested to decompress %d bytes to buffer size %d\n", src_len, dest_len);
+	    // printk(KERN_ALERT LOG_PREFIX "just info, requested to decompress %d bytes to buffer size %d\n", src_len, dest_len);
             ret = qat_action(decompPerformOp, level, src, src_len, dest, dest_len, c_len);
             break;
         
@@ -1224,7 +1273,7 @@ qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len, char *de
             // not possible
             break;
     }
-    
+
     return ret;
 }
 
