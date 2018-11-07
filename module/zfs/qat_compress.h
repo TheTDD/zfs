@@ -24,8 +24,8 @@
 
 #if defined(_KERNEL) && defined(HAVE_QAT)
 #include <sys/zio.h>
-#include "cpa.h"
-#include "dc/cpa_dc.h"
+// #include "cpa.h"
+// #include "dc/cpa_dc.h"
 
 typedef enum qat_compress_dir {
 	QAT_COMPRESS = 0,
@@ -34,15 +34,15 @@ typedef enum qat_compress_dir {
 
 extern int qat_init(void);
 extern void qat_fini(void);
-extern boolean_t qat_use_accel(size_t s_len);
-extern int qat_compress(qat_compress_dir_t dir, char *src, int src_len,
+extern boolean_t qat_use_accel(qat_compress_dir_t dir, size_t s_len);
+extern boolean_t qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len,
     char *dst, int dst_len, size_t *c_len);
 #else
 #define	CPA_STATUS_SUCCESS	0
 #define	qat_init()
 #define	qat_fini()
-#define	qat_use_accel(s_len)	0
-#define	qat_compress(dir, s, sl, d, dl, cl)	0
+#define	qat_use_accel(dir, s_len)	0
+#define	qat_compress(dir, lvl, s, sl, d, dl, cl)	0
 #endif
 
 #endif /* _SYS_QAT_COMPRESS_H */

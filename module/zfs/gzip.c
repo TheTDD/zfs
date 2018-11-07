@@ -58,9 +58,8 @@ gzip_compress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 	ASSERT(d_len <= s_len);
 
 	/* check if hardware accelerator can be used */
-	if (qat_use_accel(s_len)) {
-		if (qat_compress(QAT_COMPRESS, s_start,
-		    s_len, d_start, d_len, &dstlen) == CPA_STATUS_SUCCESS)
+	if (qat_use_accel(QAT_COMPRESS, s_len)) {
+		if (qat_compress(QAT_COMPRESS, n, s_start, s_len, d_start, d_len, &dstlen))
 			return ((size_t)dstlen);
 		/* if hardware compress fail, do it again with software */
 	}
@@ -85,9 +84,8 @@ gzip_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len, int n)
 	ASSERT(d_len >= s_len);
 
 	/* check if hardware accelerator can be used */
-	if (qat_use_accel(d_len)) {
-		if (qat_compress(QAT_DECOMPRESS, s_start, s_len,
-		    d_start, d_len, &dstlen) == CPA_STATUS_SUCCESS)
+	if (qat_use_accel(QAT_DECOMPRESS, d_len)) {
+		if (qat_compress(QAT_DECOMPRESS, n, s_start, s_len, d_start, d_len, &dstlen))
 			return (0);
 		/* if hardware de-compress fail, do it again with software */
 	}
