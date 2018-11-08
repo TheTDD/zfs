@@ -658,19 +658,14 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     unsigned long timeout = 0;
 
     CpaStatus status = CPA_STATUS_SUCCESS;
-    CpaPhysBufferList *pBufferListSrc = NULL;
-    CpaPhysBufferList *pBufferListDst = NULL;
-    // Cpa32U bufferSize = dest_len;
+    CpaFlatBuffer srcBuf = {0};
+    CpaFlatBuffer destBuf = {0};
+
     // recovery from errors is more expensive then successful compression
     // therefore set the size of output buffer by Intel's recomendation
     // Destination buffer size in bytes = ceil(9 * Total input bytes / 8) + 55 bytes
     Cpa32U bufferSize = ceil( 9 * src_len, 8 ) + 55;
-    Cpa32U numSrcBuffers = 2;
-    Cpa32U numDestBuffers = 1;
-    Cpa32U bufferListMemSize = 0;
-    Cpa8U *pSrcBuffer1 = NULL;
-    Cpa8U *pSrcBuffer2 = NULL;
-    Cpa8U *pDstBuffer = NULL;
+
     CpaDcDpOpData *pOpData = NULL;
 
     CpaFlatBuffer headerBuf = {0};
@@ -684,66 +679,33 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     QAT_STAT_BUMP(comp_requests);
     QAT_STAT_INCR(comp_total_in_bytes, src_len);
 
-    /* Size of CpaPhysBufferList and array of CpaPhysFlatBuffers */
-    bufferListMemSize =
-        sizeof(CpaPhysBufferList) + (numSrcBuffers * sizeof(CpaPhysFlatBuffer));
-
-    /* Allocte 8-byte alligned source buffer List */
-    status = PHYS_CONTIG_ALLOC_ALIGNED(&pBufferListSrc, bufferListMemSize, 8);
-    if (CPA_STATUS_SUCCESS == status)
-    {
-        /* Allocate data buffer to hold the data */
-        status = PHYS_CONTIG_ALLOC(&pSrcBuffer1, src_len / 2);
-    }
-    if (CPA_STATUS_SUCCESS == status)
-    {
-	memcpy(pSrcBuffer1, src, src_len / 2);
-	
-	status = PHYS_CONTIG_ALLOC(&pSrcBuffer2, src_len - src_len / 2);
-    }
-
-    if (CPA_STATUS_SUCCESS == status)
-    {
-        /* copy source into buffer */
-        memcpy(pSrcBuffer2, &src[src_len / 2], src_len - src_len / 2);
-
-        /* Build source bufferList */
-        pBufferListSrc->numBuffers = numSrcBuffers;
-        pBufferListSrc->flatBuffers[0].dataLenInBytes = src_len / 2;
-        pBufferListSrc->flatBuffers[0].bufferPhysAddr = virt_to_phys(pSrcBuffer1);
-        pBufferListSrc->flatBuffers[1].dataLenInBytes = src_len - src_len / 2;
-        pBufferListSrc->flatBuffers[1].bufferPhysAddr = virt_to_phys(pSrcBuffer2);
-
-
-        /* Allocate destination buffer the same size as source buffer but in
-           an SGL with 1 buffer */
-        bufferListMemSize = sizeof(CpaPhysBufferList) +
-                            (numDestBuffers * sizeof(CpaPhysFlatBuffer));
-        status =
-            PHYS_CONTIG_ALLOC_ALIGNED(&pBufferListDst, bufferListMemSize, 8);
-    }
-    if (CPA_STATUS_SUCCESS == status)
-    {
-        status = PHYS_CONTIG_ALLOC(&pDstBuffer, bufferSize);
-    }
-    if (CPA_STATUS_SUCCESS == status)
-    {
-        /* Build destination bufferList */
-        pBufferListDst->numBuffers = numDestBuffers;
-        pBufferListDst->flatBuffers[0].dataLenInBytes = bufferSize;
-        pBufferListDst->flatBuffers[0].bufferPhysAddr = virt_to_phys(pDstBuffer);
-
-        /* Allocate memory for operational data. Note this needs to be
-         * 8-byte aligned, contiguous, resident in DMA-accessible
-         * memory.
-         */
-        status = PHYS_CONTIG_ALLOC_ALIGNED(&pOpData, sizeof(CpaDcDpOpData), 8);
-    }
-
-    status = PHYS_CONTIG_ALLOC(&headerBuf.pData, ZLIB_HEAD_SZ);
+    // source buffer
     if (CPA_STATUS_SUCCESS == status) 
     {
+	status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len, 8);
+	srcBuf.dataLenInBytes = src_len;
+    }
+
+    // destination buffer
+    if (CPA_STATUS_SUCCESS == status) 
+    {
+
+	memcpy(srcBuf.pData, src, src_len);
+
+	status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, 8);
+	destBuf.dataLenInBytes = bufferSize;
+    }
+
+    // header buffer
+    if (CPA_STATUS_SUCCESS == status) 
+    {
+
+        status = PHYS_CONTIG_ALLOC(&headerBuf.pData, ZLIB_HEAD_SZ);
 	headerBuf.dataLenInBytes = ZLIB_HEAD_SZ;
+    }
+    
+    if (CPA_STATUS_SUCCESS == status) 
+    {
 	// generate header into own buffer
 	status = cpaDcGenerateHeader(sessionHdl, &headerBuf, &hdr_sz);
 	if (CPA_STATUS_SUCCESS != status) 
@@ -752,6 +714,17 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		printk(KERN_CRIT LOG_PREFIX "failed to generate header into buffer of size %d (status=%d)\n", 
 		    headerBuf.dataLenInBytes, status);
 	}
+    }
+    
+    // allocate pOpData
+    if (CPA_STATUS_SUCCESS == status) 
+    {
+
+        /* Allocate memory for operational data. Note this needs to be
+         * 8-byte aligned, contiguous, resident in DMA-accessible
+         * memory.
+         */
+        status = PHYS_CONTIG_ALLOC_ALIGNED(&pOpData, sizeof(CpaDcDpOpData), 8);
     }
 
     if (CPA_STATUS_SUCCESS == status)
@@ -763,10 +736,10 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         pOpData->bufferLenForData = bufferSize;
         pOpData->dcInstance = dcInstHandle;
         pOpData->pSessionHandle = sessionHdl;
-        pOpData->srcBuffer = virt_to_phys(pBufferListSrc);
-        pOpData->srcBufferLen = CPA_DP_BUFLIST;
-        pOpData->destBuffer = virt_to_phys(pBufferListDst);
-        pOpData->destBufferLen = CPA_DP_BUFLIST;
+        pOpData->srcBuffer = virt_to_phys(srcBuf.pData);
+        pOpData->srcBufferLen = srcBuf.dataLenInBytes;
+        pOpData->destBuffer = virt_to_phys(destBuf.pData);
+        pOpData->destBufferLen = destBuf.dataLenInBytes;
         pOpData->sessDirection = CPA_DC_DIR_COMPRESS;
         INIT_DC_DP_CNV_OPDATA(pOpData);
         pOpData->thisPhys = virt_to_phys(pOpData);
@@ -786,7 +759,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         if (CPA_STATUS_SUCCESS != status)
         {
 	    register_error_status(status);
-            printk(KERN_CRIT LOG_PREFIX "submitting of compression job failed (status = %d)\n", status);
+            printk(KERN_CRIT LOG_PREFIX "compression job submit failed (status = %d)\n", status);
         }
     }
 
@@ -862,11 +835,11 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     if (CPA_STATUS_SUCCESS == status) 
     {
 	status = PHYS_CONTIG_ALLOC(&footerBuf.pData, ZLIB_FOOT_SZ);
+        footerBuf.dataLenInBytes = ZLIB_FOOT_SZ;
     }
 
     if (CPA_STATUS_SUCCESS == status) 
     {
-        footerBuf.dataLenInBytes = ZLIB_FOOT_SZ;
         // generate footer into own buffer but updates pOpData->results
         status = cpaDcGenerateFooter(sessionHdl, &footerBuf, &pOpData->results);
 	if (CPA_STATUS_SUCCESS != status) 
@@ -895,7 +868,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
 	    // copy compression result to destination
 	    memcpy(&dest[0], 	  			headerBuf.pData, 	hdr_sz);
-	    memcpy(&dest[hdr_sz], 			pDstBuffer, 		compressed_sz);
+	    memcpy(&dest[hdr_sz], 			destBuf.pData, 		compressed_sz);
 	    memcpy(&dest[hdr_sz + compressed_sz],       footerBuf.pData,        foot_sz);
 
 	    // save size of compressed data
@@ -915,11 +888,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
      * Free the memory!
      */
     PHYS_CONTIG_FREE(pOpData);
-    PHYS_CONTIG_FREE(pSrcBuffer1);
-    PHYS_CONTIG_FREE(pSrcBuffer2);
-    PHYS_CONTIG_FREE(pBufferListSrc);
-    PHYS_CONTIG_FREE(pDstBuffer);
-    PHYS_CONTIG_FREE(pBufferListDst);
+    PHYS_CONTIG_FREE(srcBuf.pData);
+    PHYS_CONTIG_FREE(destBuf.pData);
     PHYS_CONTIG_FREE(headerBuf.pData);
     PHYS_CONTIG_FREE(footerBuf.pData);
 
@@ -943,14 +913,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
     unsigned long timeout = 0;
 
     CpaStatus status = CPA_STATUS_SUCCESS;
-    CpaPhysBufferList *pBufferListSrc = NULL;
-    CpaPhysBufferList *pBufferListDst = NULL;
     // For decompression operations, the minimal destination buffer size should be 258 bytes.
     Cpa32U bufferSize = max(258L, (long)dest_len);
-    Cpa32U numBuffers = 1;
-    Cpa32U bufferListMemSize = 0;
-    Cpa8U *pSrcBuffer = NULL;
-    Cpa8U *pDstBuffer = NULL;
+    CpaFlatBuffer srcBuf = {0};
+    CpaFlatBuffer destBuf = {0};
     CpaDcDpOpData *pOpData = NULL;
 
     // printk(KERN_ALERT LOG_PREFIX "just inform, decompress %d to %d bytes\n", src_len, dest_len);
@@ -958,42 +924,23 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
     QAT_STAT_BUMP(decomp_requests);
     QAT_STAT_INCR(decomp_total_in_bytes, src_len);
 
-    /* Size of CpaPhysBufferList and array of CpaPhysFlatBuffers */
-    bufferListMemSize =
-        sizeof(CpaPhysBufferList) + (numBuffers * sizeof(CpaPhysFlatBuffer));
-
-    /* Allocte 8-byte alligned source buffer List */
-    status = PHYS_CONTIG_ALLOC_ALIGNED(&pBufferListSrc, bufferListMemSize, 8);
-    if (CPA_STATUS_SUCCESS == status)
+    if (CPA_STATUS_SUCCESS == status) 
     {
-        /* Allocate data buffer to hold the data */
-        status = PHYS_CONTIG_ALLOC(&pSrcBuffer, src_len - ZLIB_HEAD_SZ);
+	status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len - ZLIB_HEAD_SZ, 8);
+	srcBuf.dataLenInBytes = src_len - ZLIB_HEAD_SZ;
     }
-    if (CPA_STATUS_SUCCESS == status)
+    
+    if (CPA_STATUS_SUCCESS == status) 
     {
-        /* copy source into buffer */
-        memcpy(pSrcBuffer, &src[ZLIB_HEAD_SZ], src_len - ZLIB_HEAD_SZ);
+    
+	memcpy(srcBuf.pData, &src[ZLIB_HEAD_SZ], src_len - ZLIB_HEAD_SZ);
 
-        /* Build source bufferList */
-        pBufferListSrc->numBuffers = 1;
-        pBufferListSrc->flatBuffers[0].dataLenInBytes = src_len - ZLIB_HEAD_SZ;
-        pBufferListSrc->flatBuffers[0].bufferPhysAddr = virt_to_phys(pSrcBuffer);
-
-        /* Allocate destination buffer with 1 buffer */
-        bufferListMemSize = sizeof(CpaPhysBufferList) +
-                            (numBuffers * sizeof(CpaPhysFlatBuffer));
-        status = PHYS_CONTIG_ALLOC_ALIGNED(&pBufferListDst, bufferListMemSize, 8);
+	status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, 8);
+	destBuf.dataLenInBytes = bufferSize;
     }
-    if (CPA_STATUS_SUCCESS == status)
+    
+    if (CPA_STATUS_SUCCESS == status) 
     {
-        status = PHYS_CONTIG_ALLOC(&pDstBuffer, bufferSize);
-    }
-    if (CPA_STATUS_SUCCESS == status)
-    {
-        /* Build destination bufferList */
-        pBufferListDst->numBuffers = 1;
-        pBufferListDst->flatBuffers[0].dataLenInBytes = bufferSize;
-        pBufferListDst->flatBuffers[0].bufferPhysAddr = virt_to_phys(pDstBuffer);
 
         /* Allocate memory for operational data. Note this needs to be
          * 8-byte aligned, contiguous, resident in DMA-accessible
@@ -1011,10 +958,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         pOpData->bufferLenForData = bufferSize;
         pOpData->dcInstance = dcInstHandle;
         pOpData->pSessionHandle = sessionHdl;
-        pOpData->srcBuffer = virt_to_phys(pBufferListSrc);
-        pOpData->srcBufferLen = CPA_DP_BUFLIST;
-        pOpData->destBuffer = virt_to_phys(pBufferListDst);
-        pOpData->destBufferLen = CPA_DP_BUFLIST;
+        pOpData->srcBuffer = virt_to_phys(srcBuf.pData);
+        pOpData->srcBufferLen = srcBuf.dataLenInBytes;
+        pOpData->destBuffer = virt_to_phys(destBuf.pData);
+        pOpData->destBufferLen = destBuf.dataLenInBytes;
         pOpData->sessDirection = CPA_DC_DIR_DECOMPRESS;
         INIT_DC_DP_CNV_OPDATA(pOpData);
         pOpData->thisPhys = virt_to_phys(pOpData);
@@ -1034,7 +981,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         if (CPA_STATUS_SUCCESS != status)
         {
     	    register_error_status(status);
-            printk(KERN_CRIT LOG_PREFIX "submitting of decompression job failed (status = %d)\n", status);
+            printk(KERN_CRIT LOG_PREFIX "decompression job submit failed (status = %d)\n", status);
         }
     }
 
@@ -1087,7 +1034,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         	} else {
 
             		// copy data from output buffer to destination
-            		memcpy(dest, pDstBuffer, pOpData->results.produced);
+            		memcpy(dest, destBuf.pData, pOpData->results.produced);
 
 			// save result size
             		*c_len = pOpData->results.produced;
@@ -1108,10 +1055,8 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
      * Free the memory!
      */
     PHYS_CONTIG_FREE(pOpData);
-    PHYS_CONTIG_FREE(pSrcBuffer);
-    PHYS_CONTIG_FREE(pBufferListSrc);
-    PHYS_CONTIG_FREE(pDstBuffer);
-    PHYS_CONTIG_FREE(pBufferListDst);
+    PHYS_CONTIG_FREE(srcBuf.pData);
+    PHYS_CONTIG_FREE(destBuf.pData);
 
     return ret;
 }
