@@ -63,15 +63,17 @@
 #define	QAT_MAX_BUF_SIZE_COMP	(128*1024)
 #define QAT_MAX_BUF_SIZE_DECOMP (1024*1024)
 
-#define LOG_PREFIX "ZFS-QAT: "
+#define LOG_PREFIX "ZFS-QAT/dc: "
 
 /*
  * Used for qat kstat.
  */
 typedef struct qat_stats {
 
+	/*
+	 * Number of times engine is failed to initialize.
+	 */
 	kstat_named_t init_failed;
-
 	/*
 	 * Number of jobs submitted to qat compression engine.
 	 */
@@ -108,18 +110,21 @@ typedef struct qat_stats {
 	kstat_named_t decomp_total_out_bytes;
 	/*
 	 * Number of decompression fails in qat engine.
-	 * Note: when qat fail happens, it doesn't mean a critical hardware
-	 * issue, sometimes it is because the output buffer is not big enough,
-	 * and the compression job will be transfered to gzip software again,
-	 * so the functionality of ZFS is not impacted.
+	 * Note: failed decompression is the software issue or 
+	 * it does mean a critical hardwar issue.
 	 */
 	kstat_named_t decomp_fails;
 
+	/* number of times engine failed to generate ZLIB header */
 	kstat_named_t err_gen_header;
+	/* number of time engine failed to perform the operation in time */
 	kstat_named_t err_timeout;
-	kstat_named_t err_gen_footer;
-	kstat_named_t err_too_big_result;
+	/* number of times engine failed to generate ZLIB footer */
+    	kstat_named_t err_gen_footer;
+	/* number of times the engine found uncompressible data or decompression issue */
+	kstat_named_t err_overflow;;
 
+	/* values of status error codes */
 	kstat_named_t err_status_fail;
 	kstat_named_t err_status_retry;
 	kstat_named_t err_status_param;
@@ -128,11 +133,15 @@ typedef struct qat_stats {
 	kstat_named_t err_status_restarting;
 	kstat_named_t err_status_unknown;
 
+	/* values of pOpData->results.status error codes */
 	kstat_named_t err_op_overflow;
 	kstat_named_t err_op_hw;
 	kstat_named_t err_op_sw;
 	kstat_named_t err_op_fatal;
 	kstat_named_t err_op_unknown;
+
+	kstat_named_t throughput_comp_bps;
+	kstat_named_t throughput_decomp_bps;
 
 } qat_stats_t;
 
@@ -152,7 +161,7 @@ qat_stats_t qat_stats = {
 	{ "err_gen_header",                     KSTAT_DATA_UINT64 },
         { "err_timeout",                        KSTAT_DATA_UINT64 },
         { "err_gen_footer",                     KSTAT_DATA_UINT64 },
-	{ "err_too_big_result",                 KSTAT_DATA_UINT64 },
+	{ "err_overflow",                 	KSTAT_DATA_UINT64 },
 
 	// from operations
         { "err_status_fail",                    KSTAT_DATA_UINT64 },
@@ -170,6 +179,9 @@ qat_stats_t qat_stats = {
         { "err_op_fatal",                       KSTAT_DATA_UINT64 },
 	{ "err_op_unknown",                     KSTAT_DATA_UINT64 },
 
+	{ "throughput_comp_bps",		KSTAT_DATA_UINT64 },
+	{ "throughput_decomp_bps",		KSTAT_DATA_UINT64 },
+
 };
 
 static kstat_t *qat_ksp;
@@ -180,6 +192,9 @@ int zfs_qat_init_failure_threshold = 100;
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t instNum = ATOMIC_INIT(0);
+
+static volatile uint64_t compressionTimeMs = 0;
+static volatile uint64_t decompressionTimeMs = 0;
 
 #ifdef __x86_64__
 #define ADDR_LEN uint64_t
@@ -203,6 +218,26 @@ static atomic_t instNum = ATOMIC_INIT(0);
 
 #define	PHYS_CONTIG_FREE(p_mem_addr)	\
 	mem_free_contig((void *)&(p_mem_addr))
+
+static inline void 
+updateThroughputComp(uint64_t start, uint64_t end) {
+    unsigned long ms = jiffies_to_msecs(end - start);
+    uint64_t time = atomic_add_64_nv(&compressionTimeMs, ms);
+    if (time > 0) {
+        uint64_t processed = qat_stats.comp_total_out_bytes.value.ui64;
+	atomic_swap_64(&qat_stats.throughput_comp_bps.value.ui64, 1000 * processed / time);
+    }
+}
+
+static inline void 
+updateThroughputDecomp(uint64_t start, uint64_t end) {
+    unsigned long ms = jiffies_to_msecs(end - start);
+    uint64_t time = atomic_add_64_nv(&decompressionTimeMs, ms);
+    if (time > 0) {
+	uint64_t processed = qat_stats.decomp_total_out_bytes.value.ui64;
+	atomic_swap_64(&qat_stats.throughput_decomp_bps.value.ui64, 1000 * processed / time);
+    }
+}
 
 static inline CpaStatus
 mem_alloc_contig(void **ppMemAddr, Cpa32U sizeBytes, Cpa32U alignment)
@@ -268,7 +303,6 @@ qat_init(void)
 void
 qat_fini(void)
 {
-
 	if (qat_ksp != NULL) {
 		kstat_delete(qat_ksp);
 		qat_ksp = NULL;
@@ -279,20 +313,25 @@ boolean_t
 qat_use_accel(qat_compress_dir_t dir, size_t s_len)
 {
 
+    boolean_t ret = B_FALSE;
+
     switch (dir) {
 	case QAT_COMPRESS:
-	    return (0 == zfs_qat_disable_compression) &&
+	    ret = (0 == zfs_qat_disable_compression) &&
 		(QAT_MIN_BUF_SIZE <= s_len && s_len <= QAT_MAX_BUF_SIZE_COMP);
-
+	    break;
+	    
 	case QAT_DECOMPRESS:
-	    return (0 == zfs_qat_disable_decompression) &&
+	    ret = (0 == zfs_qat_disable_decompression) &&
 		(QAT_MIN_BUF_SIZE <= s_len && s_len <= QAT_MAX_BUF_SIZE_DECOMP);
-
+	    break;
+	    
 	default:
 	    // impossible
-	    return B_FALSE;
-	    
+	    break;;
     }
+    
+    return (ret);
 
 }
 
@@ -490,11 +529,9 @@ static void
 qat_dc_callback_polled(CpaDcDpOpData *pOpData)
 {
     pOpData->pCallbackTag = (void *)1;
-
 }
 
-
-static unsigned long
+static inline unsigned long
 getTimeoutMs(const int dataSize, const int maxSize) {
 
     unsigned long timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
@@ -505,42 +542,57 @@ getTimeoutMs(const int dataSize, const int maxSize) {
 static CpaStatus
 isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled) {
 
-    CpaInstanceInfo2 instanceInfo = {0};
+    CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
 
-    // get type of instance, polled (1) or interrupt (0)
-    status = cpaDcInstanceGetInfo2(dcInstHandle, &instanceInfo);
+    instanceInfo = vmalloc(sizeof(CpaInstanceInfo2));
+    if (!instanceInfo) {
+	status = CPA_STATUS_FAIL;
+    }
+
     if (CPA_STATUS_SUCCESS == status) {
-	*polled = instanceInfo.isPolled;
+	// get type of instance, polled (1) or interrupt (0)
+	status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
+	if (CPA_STATUS_SUCCESS == status) {
+	    *polled = instanceInfo->isPolled;
+	}
+
+	vfree(instanceInfo);
     }
 
     return status;
 }
 
-
-
+// warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name
 static CpaStatus
 getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName) {
 
-    CpaInstanceInfo2 instanceInfo = {0};
+    CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
 
-    // get type of instance, polled (1) or interrupt (0)
-    status = cpaDcInstanceGetInfo2(dcInstHandle, &instanceInfo);
-    if (CPA_STATUS_SUCCESS == status) {
-	strncpy(instName, instanceInfo.instName, CPA_INST_NAME_SIZE);
+    instanceInfo = vmalloc(sizeof(CpaInstanceInfo2));
+    if (!instanceInfo) {
+	status = CPA_STATUS_FAIL;
     }
 
+    if (CPA_STATUS_SUCCESS == status) {
+        // get name of instance
+	status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
+	if (CPA_STATUS_SUCCESS == status) {
+	    strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
+	}
+	
+	vfree(instanceInfo);
+    }
+    
     return status;
 }
-
-
 
 static CpaStatus
 waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs) {
 
     CpaStatus status = CPA_STATUS_SUCCESS;
-    Cpa8U instanceName[CPA_INST_NAME_SIZE + 1];
+    Cpa8U *instanceName = NULL; 
 
     if (polled) {
 
@@ -552,13 +604,24 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
     	{
     	    if (jiffies_to_msecs(jiffies - started) > timeoutMs)
     	    {
-		memset(instanceName, 0, sizeof(instanceName));
 
-		if (CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) {
+		instanceName = vmalloc(CPA_INST_NAME_SIZE + 1);
+		if (instanceName) 
+		{
+		    memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
+		}
+
+		if (instanceName && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) {
 	        	printk(KERN_WARNING LOG_PREFIX "instance %s: timeout over %lu ms for polled engine\n", instanceName, timeoutMs);
 		} else {
 	        	printk(KERN_WARNING LOG_PREFIX "timeout over %lu ms for polled engine\n", timeoutMs);
 		}
+
+		if (instanceName) 
+		{
+		    vfree(instanceName);
+		}
+
     	    	QAT_STAT_BUMP(err_timeout);
         	status = CPA_STATUS_FAIL;
 		break;
@@ -578,12 +641,22 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
     	if (!wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) 
     	{
 
-	    memset(instanceName, 0, sizeof(instanceName));
 
-	    if (CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) {
+	    instanceName = vmalloc(CPA_INST_NAME_SIZE + 1);
+	    if (instanceName) 
+	    {
+		memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
+	    }
+
+	    if (instanceName && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) {
 	    	printk(KERN_WARNING LOG_PREFIX "instance %s: timeout over %lu ms for non-polled engine\n", instanceName, timeoutMs);
 	    } else {
 	    	printk(KERN_WARNING LOG_PREFIX "timeout over %lu ms for non-polled engine\n", timeoutMs);
+	    }
+
+	    if (instanceName)
+	    {
+		vfree(instanceName);
 	    }
 
             QAT_STAT_BUMP(err_timeout);
@@ -815,7 +888,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		
 		// if result is already bigger then buffer+header, no need to generate footer
 		if (pOpData->results.produced + hdr_sz > dest_len) {
-            		QAT_STAT_BUMP(err_too_big_result);
+            		QAT_STAT_BUMP(err_overflow);
             		printk(KERN_DEBUG LOG_PREFIX "compression of %d produced output of %d (+%d header) bytes but output buffer is only %d\n", 
 				src_len, pOpData->results.produced, hdr_sz, dest_len);
 
@@ -857,7 +930,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
 	if (hdr_sz + compressed_sz + foot_sz > dest_len) {
 
-	    QAT_STAT_BUMP(err_too_big_result);
+	    QAT_STAT_BUMP(err_overflow);
             printk(KERN_DEBUG LOG_PREFIX "compression of %d produced output of %d (+%d header, +%d footer) bytes but output buffer is only %d\n", 
 			src_len, compressed_sz, hdr_sz, foot_sz, dest_len);
 
@@ -1026,7 +1099,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
                 // PRINT_DBG("CRC checksum 0x%x\n", pOpData->results.checksum);
 		
 		if (pOpData->results.produced > dest_len) {
-            		QAT_STAT_BUMP(err_too_big_result);
+            		QAT_STAT_BUMP(err_overflow);
             		printk(KERN_ERR LOG_PREFIX "decompression of %d produced output of %d bytes but output buffer is only %d\n", 
 				src_len, pOpData->results.produced, dest_len);
             		status = CPA_STATUS_FAIL;
@@ -1337,16 +1410,27 @@ qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len, char *de
 
     qat_compress_status_t ret = QAT_COMPRESS_FAIL;
 
-    switch (dir) {
+    unsigned long start = jiffies;
+
+    switch (dir) 
+    {
 
         case QAT_COMPRESS:
 	    // printk(KERN_ALERT LOG_PREFIX "just info, requested to compress %d bytes to buffer size %d\n", src_len, dest_len);
             ret = qat_action(compPerformOp, level, src, src_len, dest, dest_len, c_len);
+	    if (QAT_COMPRESS_SUCCESS == ret) 
+	    {
+		updateThroughputComp(start, jiffies);
+	    }
             break;
 
         case QAT_DECOMPRESS:
 	    // printk(KERN_ALERT LOG_PREFIX "just info, requested to decompress %d bytes to buffer size %d\n", src_len, dest_len);
             ret = qat_action(decompPerformOp, level, src, src_len, dest, dest_len, c_len);
+	    if (QAT_COMPRESS_SUCCESS == ret) 
+	    {
+		updateThroughputDecomp(start, jiffies);
+	    }
             break;
         
         default:
