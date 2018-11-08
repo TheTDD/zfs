@@ -27,8 +27,11 @@
 #include <linux/completion.h>
 #include <sys/zfs_context.h>
 
+// #include <time.h>
+
 #include <cpa.h>
 #include <dc/cpa_dc_dp.h>
+#include <icp_sal_poll.h>
 
 #include "qat_compress.h"
 #include "qat_cnv_utils.h"
@@ -484,64 +487,95 @@ qat_dc_callback(CpaDcDpOpData *pOpData)
     }
 }
 
-// TODO:
-// WARNING: it is not allowed to use "polled" instances because they don't generate interrupt for timeout
-// the polled status can be read by
-// cpaDcInstanceGetInfo2 ( const CpaInstanceHandle instanceHandle, CpaInstanceInfo2 * pInstanceInfo2)
-// then pInstanceInfo2.isPolled
 
+static unsigned long
+getTimeoutMs(const int dataSize, const int maxSize) {
+
+    unsigned long timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
+    return timeout;
+
+}
+
+static CpaStatus
+waitForCompletion(const CpaInstanceHandle dcInstHandle, struct completion *complete, const unsigned long timeoutMs) {
+
+    CpaInstanceInfo2 instanceInfo = {0};
+    CpaStatus status = CPA_STATUS_SUCCESS;
+    
+    // get type of instance, polled (1) or interrupt (0)
+    status = cpaDcInstanceGetInfo2(dcInstHandle, &instanceInfo);
+    if (CPA_STATUS_SUCCESS == status) {
+	if (instanceInfo.isPolled) {
+
+    	    /* Poll for responses.
+             * Polling functions are implementation specific */
+	    const unsigned long started = jiffies;
+	
+    	    do
+    	    {   
+		if (jiffies_to_msecs(jiffies - started) > timeoutMs) {
+		    QAT_STAT_BUMP(err_timeout);
+        	    // printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
+        	    status = CPA_STATUS_FAIL;
+		    break;
+        	}
+
+        	status = icp_sal_DcPollDpInstance(dcInstHandle, 1);
+    
+    	    } while (
+        	((CPA_STATUS_SUCCESS == status) || (CPA_STATUS_RETRY == status)) && !completion_done(complete) );
+
+	} else {
+
+    	    /* we now wait until the completion of the operation using interrupts. */
+    	    if (!wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) {
+                QAT_STAT_BUMP(err_timeout);
+                // printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
+                status = CPA_STATUS_FAIL;
+    	    }
+	}
+    }
+
+    return status;
+
+}
+
+/*
+ * Loading available DC instances and select next one
+ */
 static CpaStatus
 getInstance(CpaInstanceHandle *instance) {
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa16U num_inst = 0;
     int i = 0;
-    boolean_t instanceFound = B_FALSE;
-    int cinst = 0;
-    CpaInstanceInfo2 instanceInfo = {0};
 
     CpaInstanceHandle *handles = NULL;
 
     status = cpaDcGetNumInstances(&num_inst);
     if (status != CPA_STATUS_SUCCESS || num_inst == 0) {
-            printk(KERN_WARNING LOG_PREFIX "failed counting instances, status=%d, num_inst=%d [%d]\n",
-                    status, num_inst, atomic_read(&numInitFailed));
+            printk(KERN_ALERT LOG_PREFIX "failed counting instances, num_inst=%d, num_failed=%d (status=%d)\n",
+                    num_inst, atomic_read(&numInitFailed), status);
             goto done;
     }
 
     status = PHYS_CONTIG_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
     if (status != CPA_STATUS_SUCCESS) {
-            printk(KERN_ERR LOG_PREFIX "failed allocate space for instances, status=%d, num_inst=%d\n", status, num_inst);
+            printk(KERN_CRIT LOG_PREFIX "failed allocate space for instances, num_inst=%d (status=%d)\n", num_inst, status);
             goto done;
     }
 
     status = cpaDcGetInstances(num_inst, handles);
     if (status != CPA_STATUS_SUCCESS) {
-            printk(KERN_ERR LOG_PREFIX "failed loading instances, status=%d, num_inst=%d\n", status, num_inst);
+            printk(KERN_CRIT LOG_PREFIX "failed loading instances, num_inst=%d (status=%d)\n", num_inst, status);
             goto done;
     }
 
-    // get next instance
-    // provide strong thread/smp safe rotation of instances
-    for (cinst = 0; cinst < num_inst; cinst++) {
-	smp_mb__before_atomic();
-	i = atomic_inc_return(&instNum) % num_inst;
-	smp_mb__after_atomic();
-	status = cpaDcInstanceGetInfo2(handles[i], &instanceInfo);
-	if (CPA_STATUS_SUCCESS == status) {
-	    if (!instanceInfo.isPolled) {
-		instanceFound = B_TRUE;
-		break;
-	    }
-	}
-    }
+    smp_mb__before_atomic();
+    i = atomic_inc_return(&instNum) % num_inst;
+    smp_mb__after_atomic();
 
-    if (instanceFound) {
-        *instance = handles[i];
-    } else {
-        printk(KERN_ALERT LOG_PREFIX "none of %d instances is in interrupt mode (polled=0)\n", num_inst);
-	status = CPA_STATUS_FAIL;
-    }
+    *instance = handles[i];
 
 done:
 
@@ -563,7 +597,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
     struct completion complete = {0};
     unsigned long timeout = 0;
-    struct timespec time = {0};
+    // struct timespec time = {0};
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaPhysBufferList *pBufferListSrc = NULL;
@@ -641,7 +675,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	if (CPA_STATUS_SUCCESS != status) 
 	{
 		QAT_STAT_BUMP(err_gen_header);
-		printk(KERN_CRIT LOG_PREFIX "failed to generate header in buffer of size %d, status=%d\n", headerBuf.dataLenInBytes, status);
+		printk(KERN_CRIT LOG_PREFIX "failed to generate header into buffer of size %d (status=%d)\n", 
+		    headerBuf.dataLenInBytes, status);
 	}
     }
 
@@ -670,23 +705,19 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         if (CPA_STATUS_SUCCESS != status)
         {
     	    register_error_status(status);
-            printk(KERN_CRIT LOG_PREFIX "cpaDcDpEnqueueOp failed. (status = %d)\n", status);
+            printk(KERN_CRIT LOG_PREFIX "submitting of compression job failed (status = %d)\n", status);
         }
     }
 
     if (CPA_STATUS_SUCCESS == status)
     {
-	// wait for bigger packets longer but at lease 0.5 sec
-        timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dest_len / QAT_MAX_BUF_SIZE_COMP;
-        time.tv_nsec = timeout * 1000000L;
 
-        /* we now wait until the completion of the operation. */
-        if (!wait_for_completion_interruptible_timeout(&complete, timespec_to_jiffies(&time))) {
-                QAT_STAT_BUMP(err_timeout);
-                printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
-                status = CPA_STATUS_FAIL;
-        }
+	// wait for bigger packets longer but at least 0.5 sec
+        timeout = getTimeoutMs(dest_len, QAT_MAX_BUF_SIZE_COMP);
+
+	status = waitForCompletion(dcInstHandle, &complete, timeout);
     }
+
     /*
      * We now check the results
      */
@@ -694,10 +725,11 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     {
         if (pOpData->responseStatus != CPA_STATUS_SUCCESS)
         {
+
+            register_op_status(pOpData->results.status);
+
 	    // overflow is normal condition, don't interpret as failure
 	    if (pOpData->results.status == CPA_DC_OVERFLOW) {
-                
-                register_op_status(pOpData->results.status);
                 // printk(KERN_ERR LOG_PREFIX "status=%d and results status is overflow (op_status = %d), probably should set UNCOMPRESSIBLE here\n",
                 //          pOpData->results.status);
                 ret = QAT_COMPRESS_UNCOMPRESSIBLE;
@@ -705,8 +737,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	    } else {
 		
 		register_error_status(pOpData->responseStatus);
-        	printk(KERN_ERR LOG_PREFIX "status from compression operation failed. (status = %d)\n",
-            	    pOpData->responseStatus);
+        	printk(KERN_ERR LOG_PREFIX "compression of %d to %d failed (status = %d)\n",
+            	    src_len, dest_len, pOpData->responseStatus);
 	    
 	    }
 
@@ -717,7 +749,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
             if (pOpData->results.status != CPA_DC_OK)
             {
 		register_op_status(pOpData->results.status);
-                printk(KERN_ERR LOG_PREFIX "results status not as expected (status = %d)\n",
+                printk(KERN_ERR LOG_PREFIX "compression results status not as expected (op_status = %d)\n",
                           pOpData->results.status);
                 status = CPA_STATUS_FAIL;
             }
@@ -755,12 +787,13 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     if (CPA_STATUS_SUCCESS == status) 
     {
         footerBuf.dataLenInBytes = ZLIB_FOOT_SZ;
-        // generate footer into own buffer
+        // generate footer into own buffer but updates pOpData->results
         status = cpaDcGenerateFooter(sessionHdl, &footerBuf, &pOpData->results);
 	if (CPA_STATUS_SUCCESS != status) 
 	{
 		QAT_STAT_BUMP(err_gen_footer);
-		printk(KERN_CRIT LOG_PREFIX "failed to generate footer into buffer of size %d, status=%d\n", footerBuf.dataLenInBytes, status);
+		printk(KERN_CRIT LOG_PREFIX "failed to generate footer into buffer of size %d (status=%d)\n", 
+		    footerBuf.dataLenInBytes, status);
 	}
     }
 
@@ -826,13 +859,12 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 
     struct completion complete = {0};
     unsigned long timeout = 0;
-    struct timespec time = {0};
+    // struct timespec time = {0};
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaPhysBufferList *pBufferListSrc = NULL;
     CpaPhysBufferList *pBufferListDst = NULL;
-    // For decompression operations, the minimal destination buffer size should be
-    // 258 bytes.
+    // For decompression operations, the minimal destination buffer size should be 258 bytes.
     Cpa32U bufferSize = max(258L, (long)dest_len);
     Cpa32U numBuffers = 1;
     Cpa32U bufferListMemSize = 0;
@@ -866,12 +898,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         pBufferListSrc->flatBuffers[0].dataLenInBytes = src_len - ZLIB_HEAD_SZ;
         pBufferListSrc->flatBuffers[0].bufferPhysAddr = virt_to_phys(pSrcBuffer);
 
-        /* Allocate destination buffer the same size as source buffer but in
-           an SGL with 1 buffer */
+        /* Allocate destination buffer with 1 buffer */
         bufferListMemSize = sizeof(CpaPhysBufferList) +
                             (numBuffers * sizeof(CpaPhysFlatBuffer));
-        status =
-            PHYS_CONTIG_ALLOC_ALIGNED(&pBufferListDst, bufferListMemSize, 8);
+        status = PHYS_CONTIG_ALLOC_ALIGNED(&pBufferListDst, bufferListMemSize, 8);
     }
     if (CPA_STATUS_SUCCESS == status)
     {
@@ -917,23 +947,21 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         if (CPA_STATUS_SUCCESS != status)
         {
     	    register_error_status(status);
-            printk(KERN_CRIT LOG_PREFIX "cpaDcDpEnqueueOp failed. (status = %d)\n", status);
+            printk(KERN_CRIT LOG_PREFIX "submitting of decompression job failed (status = %d)\n", status);
         }
     }
 
     if (CPA_STATUS_SUCCESS == status)
     {
-	// wait for bigger packets longer but at lease 0.5 sec
-        timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dest_len / QAT_MAX_BUF_SIZE_DECOMP;
-	time.tv_nsec = timeout * 1000000L;
 
-        /* we now wait until the completion of the operation. */
-        if (!wait_for_completion_interruptible_timeout(&complete, timespec_to_jiffies(&time))) {
-                QAT_STAT_BUMP(err_timeout);
-                printk(KERN_WARNING LOG_PREFIX "timeout for decompression of %d to %d bytes\n", src_len, dest_len);
-                status = CPA_STATUS_FAIL;
-        }
+	// wait for bigger packets longer but at lease 0.5 sec
+        timeout = getTimeoutMs(dest_len, QAT_MAX_BUF_SIZE_DECOMP);
+	// time.tv_nsec = timeout * 1000000L;
+
+	status = waitForCompletion(dcInstHandle, &complete, timeout);
+
     }
+
     /*
      * We now check the results
      */
@@ -942,9 +970,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         if (pOpData->responseStatus != CPA_STATUS_SUCCESS)
         {
 	    register_error_status(pOpData->responseStatus);
-            printk(KERN_ERR LOG_PREFIX "status from decompression operation failed. (status = %d)\n",
-                pOpData->responseStatus);
-
+	    register_op_status(pOpData->results.status);
+	
+            printk(KERN_ERR LOG_PREFIX "decompression operation failed with op_status=%d (status = %d)\n",
+                pOpData->results.status, pOpData->responseStatus);
 
             status = CPA_STATUS_FAIL;
         }
@@ -953,7 +982,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
             if (pOpData->results.status != CPA_DC_OK)
             {
 		register_op_status(pOpData->results.status);
-                printk(KERN_ERR LOG_PREFIX "results status not as expected (status = %d)\n",
+                printk(KERN_ERR LOG_PREFIX "decompression results status not as expected (op_status = %d)\n",
                           pOpData->results.status);
                 status = CPA_STATUS_FAIL;
             }
@@ -977,12 +1006,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 			// save result size
             		*c_len = pOpData->results.produced;
             		
-
             		QAT_STAT_INCR(decomp_total_out_bytes, *c_len);
 
             		ret = QAT_COMPRESS_SUCCESS;
         	}
-		
             }
         }
     }
@@ -1003,6 +1030,11 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
     return ret;
 }
 
+/*************************************************************************
+*
+* convert GZIP compression level to QAT DC
+*
+*************************************************************************/
 static inline CpaDcCompLvl compLevel(int level) {
 
     switch (level) {
@@ -1023,7 +1055,7 @@ static inline CpaDcCompLvl compLevel(int level) {
 
 /*************************************************************************
 *
-* QAT Compression/Decompression
+* QAT Compression/Decompression action
 *
 *************************************************************************/
 static qat_compress_status_t 
@@ -1063,7 +1095,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
     status = cpaDcQueryCapabilities(dcInstHandle, &cap);
     if (status != CPA_STATUS_SUCCESS)
     {
-	printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities\n");
+	printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities (status=%d)\n", status);
         goto failed;
     }
 
@@ -1130,7 +1162,8 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
     if (CPA_STATUS_SUCCESS == status) {
         status = cpaDcStartInstance(dcInstHandle, numInterBufs, &bufferInterArray);
 	if (CPA_STATUS_SUCCESS != status) {
-	    printk(KERN_CRIT LOG_PREFIX "failed to start instance with %d buffers of %d, status=%d\n", numInterBufs, 2 * bufSize, status);
+	    printk(KERN_CRIT LOG_PREFIX "failed to start instance with %d buffers of %d (status=%d)\n", 
+		numInterBufs, 2 * bufSize, status);
 	}
     }
 
@@ -1188,7 +1221,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
                                     sessionHdl, /* session memory */
                                     &sd);       /* session setup data */
         if (CPA_STATUS_SUCCESS != status) {
-    	    printk(KERN_CRIT LOG_PREFIX "failed to init session, status=%d\n", status);
+    	    printk(KERN_CRIT LOG_PREFIX "failed to init session (status=%d)\n", status);
         }
     }
 
@@ -1251,7 +1284,11 @@ failed:
 
 }
 
-
+/*************************************************************************
+*
+* QAT Compression/Decompression entry point
+*
+*************************************************************************/
 qat_compress_status_t
 qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len, char *dest, int dest_len, size_t *c_len) {
 
