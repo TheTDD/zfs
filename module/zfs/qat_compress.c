@@ -27,8 +27,6 @@
 #include <linux/completion.h>
 #include <sys/zfs_context.h>
 
-// #include <time.h>
-
 #include <cpa.h>
 #include <dc/cpa_dc_dp.h>
 #include <icp_sal_poll.h>
@@ -41,14 +39,6 @@
  */
 #define	TIMEOUT_MS_MIN		500
 #define TIMEOUT_MS_MAX		5000
-
-/*
- * Max instances in QAT device, each instance is a channel to submit
- * jobs to QAT hardware, this is only for pre-allocating instance,
- * and session arrays, the actual number of instances are defined in
- * the QAT driver's configure file.
- */
-// #define	MAX_INSTANCES		64
 
 /*
  * ZLIB head and foot size
@@ -72,9 +62,6 @@
 #define	QAT_MIN_BUF_SIZE	(2*1024)
 #define	QAT_MAX_BUF_SIZE_COMP	(128*1024)
 #define QAT_MAX_BUF_SIZE_DECOMP (1024*1024)
-
-// #define SAMPLE_MAX_BUFF 1024
-// #define SINGLE_INTER_BUFFLIST 1
 
 #define LOG_PREFIX "ZFS-QAT: "
 
@@ -480,11 +467,18 @@ register_op_status(CpaStatus status) {
 }
 
 static void
-qat_dc_callback(CpaDcDpOpData *pOpData)
+qat_dc_callback_interrupt(CpaDcDpOpData *pOpData)
 {
     if (pOpData->pCallbackTag != NULL) {
         complete((struct completion *)pOpData->pCallbackTag);
     }
+}
+
+static void
+qat_dc_callback_polled(CpaDcDpOpData *pOpData)
+{
+    pOpData->pCallbackTag = (void *)1;
+
 }
 
 
@@ -497,44 +491,59 @@ getTimeoutMs(const int dataSize, const int maxSize) {
 }
 
 static CpaStatus
-waitForCompletion(const CpaInstanceHandle dcInstHandle, struct completion *complete, const unsigned long timeoutMs) {
+isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled) {
 
     CpaInstanceInfo2 instanceInfo = {0};
     CpaStatus status = CPA_STATUS_SUCCESS;
-    
+
     // get type of instance, polled (1) or interrupt (0)
     status = cpaDcInstanceGetInfo2(dcInstHandle, &instanceInfo);
     if (CPA_STATUS_SUCCESS == status) {
-	if (instanceInfo.isPolled) {
-
-    	    /* Poll for responses.
-             * Polling functions are implementation specific */
-	    const unsigned long started = jiffies;
-	
-    	    do
-    	    {   
-		if (jiffies_to_msecs(jiffies - started) > timeoutMs) {
-		    QAT_STAT_BUMP(err_timeout);
-        	    // printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
-        	    status = CPA_STATUS_FAIL;
-		    break;
-        	}
-
-        	status = icp_sal_DcPollDpInstance(dcInstHandle, 1);
-    
-    	    } while (
-        	((CPA_STATUS_SUCCESS == status) || (CPA_STATUS_RETRY == status)) && !completion_done(complete) );
-
-	} else {
-
-    	    /* we now wait until the completion of the operation using interrupts. */
-    	    if (!wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) {
-                QAT_STAT_BUMP(err_timeout);
-                // printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
-                status = CPA_STATUS_FAIL;
-    	    }
-	}
+	*polled = instanceInfo.isPolled;
     }
+
+    return status;
+}
+
+
+static CpaStatus
+waitForCompletion(const CpaInstanceHandle dcInstHandle, CpaDcDpOpData *pOpData, boolean_t polled, const unsigned long timeoutMs) {
+
+    CpaStatus status = CPA_STATUS_SUCCESS;
+
+    // get type of instance, polled (1) or interrupt (0)
+    if (polled) {
+
+    	/* Poll for responses.
+         * Polling functions are implementation specific */
+	const unsigned long started = jiffies;
+	
+    	do
+    	{
+    	    if (jiffies_to_msecs(jiffies - started) > timeoutMs) {
+		QAT_STAT_BUMP(err_timeout);
+        	// printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
+        	status = CPA_STATUS_FAIL;
+		break;
+    	    }
+
+    	    status = icp_sal_DcPollDpInstance(dcInstHandle, 1);
+
+    	} while (
+    	    ((CPA_STATUS_SUCCESS == status) || (CPA_STATUS_RETRY == status)) && (pOpData->pCallbackTag == (void *)0) );
+
+    } else {
+
+	struct completion *complete = (struct completion*)pOpData->pCallbackTag;
+
+    	/* we now wait until the completion of the operation using interrupts. */
+    	if (!wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) {
+            QAT_STAT_BUMP(err_timeout);
+            // printk(KERN_WARNING LOG_PREFIX "timeout for compression of %d to %d bytes\n", src_len, dest_len);
+            status = CPA_STATUS_FAIL;
+    	}
+    }
+    
 
     return status;
 
@@ -590,6 +599,7 @@ done:
  */
 static qat_compress_status_t
 compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl, 
+    boolean_t polled,
     const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
@@ -597,7 +607,6 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
     struct completion complete = {0};
     unsigned long timeout = 0;
-    // struct timespec time = {0};
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaPhysBufferList *pBufferListSrc = NULL;
@@ -683,8 +692,6 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     if (CPA_STATUS_SUCCESS == status)
     {
 
-	init_completion(&complete);
-
         memset(pOpData, 0, sizeof(CpaDcDpOpData));
 
         pOpData->bufferLenToCompress = src_len;
@@ -698,13 +705,22 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         pOpData->sessDirection = CPA_DC_DIR_COMPRESS;
         INIT_DC_DP_CNV_OPDATA(pOpData);
         pOpData->thisPhys = virt_to_phys(pOpData);
-        pOpData->pCallbackTag = (void *)&complete;
+
+	if (polled)
+	{
+	    pOpData->pCallbackTag = (void *)0;
+	} 
+	else
+	{
+	    init_completion(&complete);
+    	    pOpData->pCallbackTag = (void *)&complete;
+    	}
 
         /** Enqueue and submit operation */
         status = cpaDcDpEnqueueOp(pOpData, CPA_TRUE);
         if (CPA_STATUS_SUCCESS != status)
         {
-    	    register_error_status(status);
+	    register_error_status(status);
             printk(KERN_CRIT LOG_PREFIX "submitting of compression job failed (status = %d)\n", status);
         }
     }
@@ -715,7 +731,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	// wait for bigger packets longer but at least 0.5 sec
         timeout = getTimeoutMs(dest_len, QAT_MAX_BUF_SIZE_COMP);
 
-	status = waitForCompletion(dcInstHandle, &complete, timeout);
+	status = waitForCompletion(dcInstHandle, pOpData, polled, timeout);
     }
 
     /*
@@ -771,8 +787,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         	} else {
 
 			// save result size
-            		// *c_len = pOpData->results.produced;
-            		// copy data from output buffer to result
+            		// copy data from output buffer to result later
 			compressed_sz = pOpData->results.produced;
         	}
             }
@@ -852,6 +867,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
  */
 static qat_compress_status_t
 decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl, 
+    const boolean_t polled,
     const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
@@ -859,7 +875,6 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 
     struct completion complete = {0};
     unsigned long timeout = 0;
-    // struct timespec time = {0};
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaPhysBufferList *pBufferListSrc = NULL;
@@ -914,7 +929,6 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         pBufferListDst->flatBuffers[0].dataLenInBytes = bufferSize;
         pBufferListDst->flatBuffers[0].bufferPhysAddr = virt_to_phys(pDstBuffer);
 
-        //<snippet name="opDataDp">
         /* Allocate memory for operational data. Note this needs to be
          * 8-byte aligned, contiguous, resident in DMA-accessible
          * memory.
@@ -924,8 +938,6 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 
     if (CPA_STATUS_SUCCESS == status)
     {
-
-	init_completion(&complete);
 
         memset(pOpData, 0, sizeof(CpaDcDpOpData));
 
@@ -940,7 +952,13 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         pOpData->sessDirection = CPA_DC_DIR_DECOMPRESS;
         INIT_DC_DP_CNV_OPDATA(pOpData);
         pOpData->thisPhys = virt_to_phys(pOpData);
-        pOpData->pCallbackTag = (void *)&complete;
+
+	if (polled) {
+	    pOpData->pCallbackTag = (void *)0;
+	} else {
+	    init_completion(&complete);
+    	    pOpData->pCallbackTag = (void *)&complete;
+        }
 
         /** Enqueue and submit operation */
         status = cpaDcDpEnqueueOp(pOpData, CPA_TRUE);
@@ -957,8 +975,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	// wait for bigger packets longer but at lease 0.5 sec
         timeout = getTimeoutMs(dest_len, QAT_MAX_BUF_SIZE_DECOMP);
 	// time.tv_nsec = timeout * 1000000L;
-
-	status = waitForCompletion(dcInstHandle, &complete, timeout);
+	status = waitForCompletion(dcInstHandle, pOpData, polled, timeout);
 
     }
 
@@ -1059,7 +1076,7 @@ static inline CpaDcCompLvl compLevel(int level) {
 *
 *************************************************************************/
 static qat_compress_status_t 
-qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSessionHandle, const char*, const int, char*, const int, size_t*),
+qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSessionHandle, const boolean_t, const char*, const int, char*, const int, size_t*),
     const int level, const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
@@ -1079,6 +1096,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
     Cpa16U numInterBufs = 0;
     Cpa32U buffMetaSize = 0;
     Cpa32U bufSize = dest_len;
+    boolean_t polled = B_FALSE;
 
     /*
      * In this simplified version of instance discovery, we discover
@@ -1167,10 +1185,21 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 	}
     }
 
+    if (CPA_STATUS_SUCCESS == status) {
+	status = isInstancePolled(dcInstHandle, &polled);
+    }
+
     if (CPA_STATUS_SUCCESS == status)
     {
         /* Register callback function for the instance */
-        status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback);
+	if (polled)
+	{
+	    status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_polled);
+	}
+	else
+	{
+	    status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_interrupt);
+	}
     }
 
     /*
@@ -1230,7 +1259,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
         CpaStatus sessionStatus = CPA_STATUS_SUCCESS;
 
         /* Perform Compression operation */
-        ret = (*func)(dcInstHandle, sessionHdl, src, src_len, dest, dest_len, c_len);
+        ret = (*func)(dcInstHandle, sessionHdl, polled, src, src_len, dest, dest_len, c_len);
 	
         sessionStatus = cpaDcDpRemoveSession(dcInstHandle, sessionHdl);
 
