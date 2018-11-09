@@ -19,6 +19,9 @@
  * CDDL HEADER END
  */
 
+#ifndef _SYS_QAT_COMMON_H
+#define _SYS_QAT_COMMON_H
+
 #if defined(_KERNEL) && defined(HAVE_QAT)
 
 #include <linux/slab.h>
@@ -50,7 +53,10 @@ extern void mem_free_contig(void **ppMemAddr);
 extern CpaStatus mem_alloc_virtual(void **ppMemAddr, const Cpa32U sizeBytes);
 extern void mem_free_virtual(void **ppMemAddr);
 
-
 #define ceil(n, d) (((n) < 0) ? (-((-(n))/(d))) : (n)/(d) + ((n)%(d) != 0))
 
-#endif
+extern int zfs_qat_init_failure_threshold;
+
+#endif // kernel/qat
+
+#endif // defined

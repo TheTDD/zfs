@@ -92,4 +92,9 @@ mem_free_virtual(void **ppMemAddr)
     }
 }
 
+int zfs_qat_init_failure_threshold = 100;
+
+module_param(zfs_qat_init_failure_threshold, int, 0644);
+MODULE_PARM_DESC(zfs_qat_init_failure_threshold, "Threshold (number of init failures) to consider disabling QAT");
+
 #endif

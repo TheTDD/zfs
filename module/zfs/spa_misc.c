@@ -57,6 +57,7 @@
 #include "zfs_prop.h"
 #include <sys/zfeature.h>
 #include "qat_compress.h"
+#include "qat_digest.h"
 
 /*
  * SPA locking
@@ -1894,7 +1895,8 @@ spa_init(int mode)
 	zpool_feature_init();
 	spa_config_load();
 	l2arc_start();
-	qat_init();
+	qat_compress_init();
+	qat_digest_init();
 }
 
 void
@@ -1916,7 +1918,8 @@ spa_fini(void)
 	unique_fini();
 	refcount_fini();
 	fm_fini();
-	qat_fini();
+	qat_compress_fini();
+	qat_digest_fini();
 
 	avl_destroy(&spa_namespace_avl);
 	avl_destroy(&spa_spare_avl);

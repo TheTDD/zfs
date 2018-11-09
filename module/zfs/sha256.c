@@ -31,6 +31,8 @@
 #include <sys/sha2.h>
 #include <sys/abd.h>
 
+#include "qat_digest.h"
+
 static int
 sha_incremental(void *buf, size_t size, void *arg)
 {
@@ -47,10 +49,26 @@ abd_checksum_SHA256(abd_t *abd, uint64_t size,
 	SHA2_CTX ctx;
 	zio_cksum_t tmp;
 
+	if (qat_digest_use_accel(QAT_DIGEST_SHA256, size)) 
+	{
+	    uint8_t *buf = abd_borrow_buf_copy(abd, size);
+	    qat_digest_status_t ret = qat_digest(QAT_DIGEST_SHA256, buf, size, &tmp);
+	    abd_return_buf(abd, buf, size);
+	    
+	    if (ret == QAT_DIGEST_SUCCESS) 
+	    {
+		goto bswap;
+	    }
+	    
+	}
+	
+	/* continue with software implementation if qat failed */
+
 	SHA2Init(SHA256, &ctx);
 	(void) abd_iterate_func(abd, 0, size, sha_incremental, &ctx);
 	SHA2Final(&tmp, &ctx);
 
+bswap:
 	/*
 	 * A prior implementation of this function had a
 	 * private SHA256 implementation always wrote things out in

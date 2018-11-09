@@ -146,7 +146,7 @@ typedef struct qat_stats {
 	
 } qat_stats_t;
 
-qat_stats_t qat_stats = {
+qat_stats_t qat_dc_stats = {
 	{ "init_failed",			KSTAT_DATA_UINT64 },
 
 	{ "comp_requests",			KSTAT_DATA_UINT64 },
@@ -189,7 +189,6 @@ static kstat_t *qat_ksp;
 
 int zfs_qat_disable_compression = 0;
 int zfs_qat_disable_decompression = 0;
-int zfs_qat_init_failure_threshold = 100;
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t instNum = ATOMIC_INIT(0);
@@ -198,7 +197,7 @@ static volatile uint64_t compressionTimeMs = 0;
 static volatile uint64_t decompressionTimeMs = 0;
 
 #define	QAT_STAT_INCR(stat, val) \
-	atomic_add_64(&qat_stats.stat.value.ui64, (val));
+	atomic_add_64(&qat_dc_stats.stat.value.ui64, (val));
 #define	QAT_STAT_BUMP(stat) \
 	QAT_STAT_INCR(stat, 1);
 
@@ -207,8 +206,8 @@ updateThroughputComp(const uint64_t start, const uint64_t end) {
     const unsigned long ms = jiffies_to_msecs(end - start);
     const uint64_t time = atomic_add_64_nv(&compressionTimeMs, ms);
     if (time > 0) {
-        const uint64_t processed = qat_stats.comp_total_out_bytes.value.ui64;
-	atomic_swap_64(&qat_stats.throughput_comp_bps.value.ui64, 1000UL * processed / time);
+        const uint64_t processed = qat_dc_stats.comp_total_out_bytes.value.ui64;
+	atomic_swap_64(&qat_dc_stats.throughput_comp_bps.value.ui64, 1000UL * processed / time);
     }
 }
 
@@ -217,23 +216,23 @@ updateThroughputDecomp(const uint64_t start, const uint64_t end) {
     const unsigned long ms = jiffies_to_msecs(end - start);
     const uint64_t time = atomic_add_64_nv(&decompressionTimeMs, ms);
     if (time > 0) {
-	const uint64_t processed = qat_stats.decomp_total_out_bytes.value.ui64;
-	atomic_swap_64(&qat_stats.throughput_decomp_bps.value.ui64, 1000UL * processed / time);
+	const uint64_t processed = qat_dc_stats.decomp_total_out_bytes.value.ui64;
+	atomic_swap_64(&qat_dc_stats.throughput_decomp_bps.value.ui64, 1000UL * processed / time);
     }
 }
 
 int
-qat_init(void)
+qat_compress_init(void)
 {
 
 	Cpa16U numInstances = 0;
 
 	qat_ksp = kstat_create("zfs", 0, "qat-dc", "misc",
-	    KSTAT_TYPE_NAMED, sizeof (qat_stats) / sizeof (kstat_named_t),
+	    KSTAT_TYPE_NAMED, sizeof (qat_dc_stats) / sizeof (kstat_named_t),
 	    KSTAT_FLAG_VIRTUAL);
 	if (qat_ksp != NULL) 
 	{
-		qat_ksp->ks_data = &qat_stats;
+		qat_ksp->ks_data = &qat_dc_stats;
 		kstat_install(qat_ksp);
 	}
 
@@ -250,7 +249,7 @@ qat_init(void)
 }
 
 void
-qat_fini(void)
+qat_compress_fini(void)
 {
 	if (qat_ksp != NULL) 
 	{
@@ -564,7 +563,6 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
     	    if (jiffies_to_msecs(jiffies - started) > timeoutMs)
     	    {
 
-
 		CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
 		if (CPA_STATUS_SUCCESS == memStatus) 
 		{
@@ -587,8 +585,9 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
 		break;
     	    }
 
-    	    status = icp_sal_DcPollDpInstance(dcInstHandle, 1);
+	    yield();
 
+    	    status = icp_sal_DcPollDpInstance(dcInstHandle, 1);
     	} 
     	while (
     	    ((CPA_STATUS_SUCCESS == status) || (CPA_STATUS_RETRY == status)) 
@@ -1421,7 +1420,8 @@ MODULE_PARM_DESC(zfs_qat_disable_compression, "Disable QAT compression");
 module_param(zfs_qat_disable_decompression, int, 0644);
 MODULE_PARM_DESC(zfs_qat_disable_decompression, "Disable QAT decompression");
 
-module_param(zfs_qat_init_failure_threshold, int, 0644);
-MODULE_PARM_DESC(zfs_qat_init_failure_threshold, "Threshold (number of init failures) to consider disabling QAT");
+// int zfs_qat_init_failure_threshold = 100;
+// module_param(zfs_qat_init_failure_threshold, int, 0644);
+// MODULE_PARM_DESC(zfs_qat_init_failure_threshold, "Threshold (number of init failures) to consider disabling QAT");
 
 #endif
