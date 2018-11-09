@@ -41,9 +41,9 @@ typedef enum qat_compress_dir {
 
 extern int qat_init(void);
 extern void qat_fini(void);
-extern boolean_t qat_use_accel(qat_compress_dir_t dir, size_t s_len);
-extern qat_compress_status_t qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len,
-    char *dst, int dst_len, size_t *c_len);
+extern boolean_t qat_use_accel(const qat_compress_dir_t dir, const size_t s_len);
+extern qat_compress_status_t qat_compress(const qat_compress_dir_t dir, const int level, const char *src, const int src_len,
+    char *dst, const int dst_len, size_t *c_len);
 #else
 #define	CPA_STATUS_SUCCESS	0
 #define	qat_init()

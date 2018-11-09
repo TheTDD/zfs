@@ -31,6 +31,7 @@
 #include <dc/cpa_dc_dp.h>
 #include <icp_sal_poll.h>
 
+#include "qat_common.h"
 #include "qat_compress.h"
 #include "qat_cnv_utils.h"
 
@@ -142,7 +143,7 @@ typedef struct qat_stats {
 
 	kstat_named_t throughput_comp_bps;
 	kstat_named_t throughput_decomp_bps;
-
+	
 } qat_stats_t;
 
 qat_stats_t qat_stats = {
@@ -181,7 +182,7 @@ qat_stats_t qat_stats = {
 
 	{ "throughput_comp_bps",		KSTAT_DATA_UINT64 },
 	{ "throughput_decomp_bps",		KSTAT_DATA_UINT64 },
-
+	
 };
 
 static kstat_t *qat_ksp;
@@ -196,80 +197,28 @@ static atomic_t instNum = ATOMIC_INIT(0);
 static volatile uint64_t compressionTimeMs = 0;
 static volatile uint64_t decompressionTimeMs = 0;
 
-#ifdef __x86_64__
-#define ADDR_LEN uint64_t
-#else
-#define ADDR_LEN uint32_t
-#endif
-
 #define	QAT_STAT_INCR(stat, val) \
 	atomic_add_64(&qat_stats.stat.value.ui64, (val));
 #define	QAT_STAT_BUMP(stat) \
 	QAT_STAT_INCR(stat, 1);
 
-#define	PHYS_CONTIG_ALLOC(pp_mem_addr, size_bytes)	\
-	mem_alloc_contig((void *)(pp_mem_addr), (size_bytes), 1)
-
-#define	PHYS_CONTIG_FREE(p_mem_addr)	\
-	mem_free_contig((void *)&(p_mem_addr))
-
-#define PHYS_CONTIG_ALLOC_ALIGNED(ppMemAddr, sizeBytes, alignment)	\
-	mem_alloc_contig((void *)(ppMemAddr), (sizeBytes), (alignment))
-
-#define	PHYS_CONTIG_FREE(p_mem_addr)	\
-	mem_free_contig((void *)&(p_mem_addr))
-
 static inline void 
-updateThroughputComp(uint64_t start, uint64_t end) {
-    unsigned long ms = jiffies_to_msecs(end - start);
-    uint64_t time = atomic_add_64_nv(&compressionTimeMs, ms);
+updateThroughputComp(const uint64_t start, const uint64_t end) {
+    const unsigned long ms = jiffies_to_msecs(end - start);
+    const uint64_t time = atomic_add_64_nv(&compressionTimeMs, ms);
     if (time > 0) {
-        uint64_t processed = qat_stats.comp_total_out_bytes.value.ui64;
-	atomic_swap_64(&qat_stats.throughput_comp_bps.value.ui64, 1000 * processed / time);
+        const uint64_t processed = qat_stats.comp_total_out_bytes.value.ui64;
+	atomic_swap_64(&qat_stats.throughput_comp_bps.value.ui64, 1000UL * processed / time);
     }
 }
 
 static inline void 
-updateThroughputDecomp(uint64_t start, uint64_t end) {
-    unsigned long ms = jiffies_to_msecs(end - start);
-    uint64_t time = atomic_add_64_nv(&decompressionTimeMs, ms);
+updateThroughputDecomp(const uint64_t start, const uint64_t end) {
+    const unsigned long ms = jiffies_to_msecs(end - start);
+    const uint64_t time = atomic_add_64_nv(&decompressionTimeMs, ms);
     if (time > 0) {
-	uint64_t processed = qat_stats.decomp_total_out_bytes.value.ui64;
-	atomic_swap_64(&qat_stats.throughput_decomp_bps.value.ui64, 1000 * processed / time);
-    }
-}
-
-static inline CpaStatus
-mem_alloc_contig(void **ppMemAddr, Cpa32U sizeBytes, Cpa32U alignment)
-{
-    void *pAlloc = NULL;
-    uint32_t align = 0;
-
-    pAlloc = kmalloc_node((sizeBytes + alignment + sizeof(void *)), GFP_KERNEL, 0);
-    if (NULL == pAlloc)
-    {
-	return CPA_STATUS_RESOURCE;
-    }
-
-    *ppMemAddr = pAlloc + sizeof(void *);
-    align = ((ADDR_LEN)(*ppMemAddr)) % alignment;
-
-    *ppMemAddr += (alignment - align);
-    *(ADDR_LEN *)(*ppMemAddr - sizeof(void *)) = (ADDR_LEN)pAlloc;
-
-    return CPA_STATUS_SUCCESS;
-}
-
-
-static inline void
-mem_free_contig(void **ppMemAddr)
-{
-    void *pAlloc = NULL;
-    if (NULL != *ppMemAddr)
-    {
-        pAlloc = (void *)(*((ADDR_LEN *)(*ppMemAddr - sizeof(void *))));
-        kfree(pAlloc);
-        *ppMemAddr = NULL;
+	const uint64_t processed = qat_stats.decomp_total_out_bytes.value.ui64;
+	atomic_swap_64(&qat_stats.throughput_decomp_bps.value.ui64, 1000UL * processed / time);
     }
 }
 
@@ -279,10 +228,11 @@ qat_init(void)
 
 	Cpa16U numInstances = 0;
 
-	qat_ksp = kstat_create("zfs", 0, "qat", "misc",
+	qat_ksp = kstat_create("zfs", 0, "qat-dc", "misc",
 	    KSTAT_TYPE_NAMED, sizeof (qat_stats) / sizeof (kstat_named_t),
 	    KSTAT_FLAG_VIRTUAL);
-	if (qat_ksp != NULL) {
+	if (qat_ksp != NULL) 
+	{
 		qat_ksp->ks_data = &qat_stats;
 		kstat_install(qat_ksp);
 	}
@@ -294,7 +244,6 @@ qat_init(void)
 	else
 	{
 	    printk(KERN_INFO LOG_PREFIX "initialized\n");
-	
 	}
 
 	return 0;
@@ -303,19 +252,21 @@ qat_init(void)
 void
 qat_fini(void)
 {
-	if (qat_ksp != NULL) {
+	if (qat_ksp != NULL) 
+	{
 		kstat_delete(qat_ksp);
 		qat_ksp = NULL;
 	}
 }
 
 boolean_t
-qat_use_accel(qat_compress_dir_t dir, size_t s_len)
+qat_use_accel(const qat_compress_dir_t dir, const size_t s_len)
 {
 
     boolean_t ret = B_FALSE;
 
-    switch (dir) {
+    switch (dir) 
+    {
 	case QAT_COMPRESS:
 	    ret = (0 == zfs_qat_disable_compression) &&
 		(QAT_MIN_BUF_SIZE <= s_len && s_len <= QAT_MAX_BUF_SIZE_COMP);
@@ -330,13 +281,13 @@ qat_use_accel(qat_compress_dir_t dir, size_t s_len)
 	    // impossible
 	    break;;
     }
-    
+
     return (ret);
 
 }
 
 static void 
-register_error_status(CpaStatus status) {
+register_error_status(const CpaStatus status) {
 
     switch (status) {
 	case CPA_STATUS_FAIL:
@@ -378,7 +329,7 @@ register_error_status(CpaStatus status) {
 }
 
 static void 
-register_op_status(CpaStatus status) {
+register_op_status(const CpaStatus status) {
 
     switch (status) {
 
@@ -532,7 +483,8 @@ qat_dc_callback_polled(CpaDcDpOpData *pOpData)
 }
 
 static inline unsigned long
-getTimeoutMs(const int dataSize, const int maxSize) {
+getTimeoutMs(const int dataSize, const int maxSize) 
+{
 
     unsigned long timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
     return timeout;
@@ -540,63 +492,70 @@ getTimeoutMs(const int dataSize, const int maxSize) {
 }
 
 static CpaStatus
-isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled) {
+isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled) 
+{
 
     CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
 
-    instanceInfo = vmalloc(sizeof(CpaInstanceInfo2));
-    if (!instanceInfo) {
-	status = CPA_STATUS_FAIL;
+    if (CPA_STATUS_SUCCESS == status) 
+    {
+	status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
     }
 
-    if (CPA_STATUS_SUCCESS == status) {
+    if (CPA_STATUS_SUCCESS == status) 
+    {
 	// get type of instance, polled (1) or interrupt (0)
 	status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-	if (CPA_STATUS_SUCCESS == status) {
+	if (CPA_STATUS_SUCCESS == status) 
+	{
 	    *polled = instanceInfo->isPolled;
 	}
-
-	vfree(instanceInfo);
     }
+    
+    VIRT_FREE(instanceInfo);
 
     return status;
 }
 
 // warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name
 static CpaStatus
-getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName) {
+getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName) 
+{
 
     CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
 
-    instanceInfo = vmalloc(sizeof(CpaInstanceInfo2));
-    if (!instanceInfo) {
-	status = CPA_STATUS_FAIL;
+    if (CPA_STATUS_SUCCESS == status)
+    {
+	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
     }
 
-    if (CPA_STATUS_SUCCESS == status) {
+    if (CPA_STATUS_SUCCESS == status) 
+    {
         // get name of instance
 	status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-	if (CPA_STATUS_SUCCESS == status) {
+	if (CPA_STATUS_SUCCESS == status) 
+	{
 	    strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
 	}
-	
-	vfree(instanceInfo);
     }
-    
+
+    VIRT_FREE(instanceInfo);
+
     return status;
 }
 
 static CpaStatus
-waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs) {
+waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs) 
+{
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa8U *instanceName = NULL; 
 
-    if (polled) {
-
-    	/* Poll for responses.
+    if (polled) 
+    {
+	/* Poll for responses.
          * Polling functions are implementation specific */
 	const unsigned long started = jiffies;
 	
@@ -605,22 +564,23 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
     	    if (jiffies_to_msecs(jiffies - started) > timeoutMs)
     	    {
 
-		instanceName = vmalloc(CPA_INST_NAME_SIZE + 1);
-		if (instanceName) 
+
+		CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
+		if (CPA_STATUS_SUCCESS == memStatus) 
 		{
 		    memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
 		}
 
-		if (instanceName && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) {
+		if (CPA_STATUS_SUCCESS == memStatus && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) 
+		{
 	        	printk(KERN_WARNING LOG_PREFIX "instance %s: timeout over %lu ms for polled engine\n", instanceName, timeoutMs);
-		} else {
+		} 
+		else 
+		{
 	        	printk(KERN_WARNING LOG_PREFIX "timeout over %lu ms for polled engine\n", timeoutMs);
 		}
 
-		if (instanceName) 
-		{
-		    vfree(instanceName);
-		}
+		VIRT_FREE(instanceName);
 
     	    	QAT_STAT_BUMP(err_timeout);
         	status = CPA_STATUS_FAIL;
@@ -629,35 +589,36 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
 
     	    status = icp_sal_DcPollDpInstance(dcInstHandle, 1);
 
-    	} while (
+    	} 
+    	while (
     	    ((CPA_STATUS_SUCCESS == status) || (CPA_STATUS_RETRY == status)) 
     		&& (pOpData->pCallbackTag == (void *)0) );
 
-    } else {
-
+    } 
+    else 
+    {
 	struct completion *complete = (struct completion*)pOpData->pCallbackTag;
 
     	/* we now wait until the completion of the operation using interrupts */
     	if (!wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) 
     	{
 
-
-	    instanceName = vmalloc(CPA_INST_NAME_SIZE + 1);
-	    if (instanceName) 
+	    CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
+	    if (CPA_STATUS_SUCCESS == memStatus) 
 	    {
 		memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
 	    }
 
-	    if (instanceName && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) {
+	    if (CPA_STATUS_SUCCESS == memStatus && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0) 
+	    {
 	    	printk(KERN_WARNING LOG_PREFIX "instance %s: timeout over %lu ms for non-polled engine\n", instanceName, timeoutMs);
-	    } else {
+	    } 
+	    else
+	    {
 	    	printk(KERN_WARNING LOG_PREFIX "timeout over %lu ms for non-polled engine\n", timeoutMs);
 	    }
 
-	    if (instanceName)
-	    {
-		vfree(instanceName);
-	    }
+	    VIRT_FREE(instanceName);
 
             QAT_STAT_BUMP(err_timeout);
             status = CPA_STATUS_FAIL;
@@ -665,14 +626,14 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
     }
 
     return status;
-
 }
 
 /*
  * Loading available DC instances and select next one
  */
 static CpaStatus
-getInstance(CpaInstanceHandle *instance) {
+getInstance(CpaInstanceHandle *instance) 
+{
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa16U num_inst = 0;
@@ -681,20 +642,23 @@ getInstance(CpaInstanceHandle *instance) {
     CpaInstanceHandle *handles = NULL;
 
     status = cpaDcGetNumInstances(&num_inst);
-    if (status != CPA_STATUS_SUCCESS || num_inst == 0) {
+    if (status != CPA_STATUS_SUCCESS || num_inst == 0) 
+    {
             printk(KERN_ALERT LOG_PREFIX "failed counting instances, num_inst=%d, num_failed=%d (status=%d)\n",
                     num_inst, atomic_read(&numInitFailed), status);
             goto done;
     }
 
     status = PHYS_CONTIG_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
-    if (status != CPA_STATUS_SUCCESS) {
+    if (status != CPA_STATUS_SUCCESS) 
+    {
             printk(KERN_CRIT LOG_PREFIX "failed allocate space for instances, num_inst=%d (status=%d)\n", num_inst, status);
             goto done;
     }
 
     status = cpaDcGetInstances(num_inst, handles);
-    if (status != CPA_STATUS_SUCCESS) {
+    if (status != CPA_STATUS_SUCCESS) 
+    {
             printk(KERN_CRIT LOG_PREFIX "failed loading instances, num_inst=%d (status=%d)\n", num_inst, status);
             goto done;
     }
@@ -712,8 +676,6 @@ done:
     return status;
 
 }
-
-#define ceil(n, d) (((n) < 0) ? (-((-(n))/(d))) : (n)/(d) + ((n)%(d) != 0))
 
 /*
  * This function performs a decompression operation.
@@ -762,7 +724,6 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     // destination buffer
     if (CPA_STATUS_SUCCESS == status) 
     {
-
 	memcpy(srcBuf.pData, src, src_len);
 
 	status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, 8);
@@ -772,11 +733,11 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
     // header buffer
     if (CPA_STATUS_SUCCESS == status) 
     {
-
         status = PHYS_CONTIG_ALLOC(&headerBuf.pData, ZLIB_HEAD_SZ);
 	headerBuf.dataLenInBytes = ZLIB_HEAD_SZ;
     }
     
+    // generate header
     if (CPA_STATUS_SUCCESS == status) 
     {
 	// generate header into own buffer
@@ -800,9 +761,9 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         status = PHYS_CONTIG_ALLOC_ALIGNED(&pOpData, sizeof(CpaDcDpOpData), 8);
     }
 
+    // submit operation
     if (CPA_STATUS_SUCCESS == status)
     {
-
         memset(pOpData, 0, sizeof(CpaDcDpOpData));
 
         pOpData->bufferLenToCompress = src_len;
@@ -887,16 +848,17 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
                 // PRINT_DBG("CRC checksum 0x%x\n", pOpData->results.checksum);
 		
 		// if result is already bigger then buffer+header, no need to generate footer
-		if (pOpData->results.produced + hdr_sz > dest_len) {
+		if (pOpData->results.produced + hdr_sz > dest_len) 
+		{
             		QAT_STAT_BUMP(err_overflow);
             		printk(KERN_DEBUG LOG_PREFIX "compression of %d produced output of %d (+%d header) bytes but output buffer is only %d\n", 
 				src_len, pOpData->results.produced, hdr_sz, dest_len);
 
 			ret = QAT_COMPRESS_UNCOMPRESSIBLE;
             		status = CPA_STATUS_FAIL;
-
-        	} else {
-
+        	} 
+        	else 
+        	{
 			// save result size
             		// copy data from output buffer to result later
 			compressed_sz = pOpData->results.produced;
@@ -905,12 +867,14 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
         }
     }
 
+    // allocate buffer for footer
     if (CPA_STATUS_SUCCESS == status) 
     {
 	status = PHYS_CONTIG_ALLOC(&footerBuf.pData, ZLIB_FOOT_SZ);
         footerBuf.dataLenInBytes = ZLIB_FOOT_SZ;
     }
 
+    // generate footer
     if (CPA_STATUS_SUCCESS == status) 
     {
         // generate footer into own buffer but updates pOpData->results
@@ -923,6 +887,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	}
     }
 
+    // store results into destination
     if (CPA_STATUS_SUCCESS == status) 
     {
 	// compressed data + footer
@@ -987,7 +952,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     // For decompression operations, the minimal destination buffer size should be 258 bytes.
-    Cpa32U bufferSize = max(258L, (long)dest_len);
+    const Cpa32U bufferSize = max(258L, (long)dest_len);
     CpaFlatBuffer srcBuf = {0};
     CpaFlatBuffer destBuf = {0};
     CpaDcDpOpData *pOpData = NULL;
@@ -997,21 +962,23 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
     QAT_STAT_BUMP(decomp_requests);
     QAT_STAT_INCR(decomp_total_in_bytes, src_len);
 
+    // allocate source buffer
     if (CPA_STATUS_SUCCESS == status) 
     {
 	status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len - ZLIB_HEAD_SZ, 8);
 	srcBuf.dataLenInBytes = src_len - ZLIB_HEAD_SZ;
     }
     
+    // allocate destination buffer
     if (CPA_STATUS_SUCCESS == status) 
     {
-    
 	memcpy(srcBuf.pData, &src[ZLIB_HEAD_SZ], src_len - ZLIB_HEAD_SZ);
 
 	status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, 8);
 	destBuf.dataLenInBytes = bufferSize;
     }
     
+    // allocate pOpData
     if (CPA_STATUS_SUCCESS == status) 
     {
 
@@ -1022,9 +989,9 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
         status = PHYS_CONTIG_ALLOC_ALIGNED(&pOpData, sizeof(CpaDcDpOpData), 8);
     }
 
+    // perform operation
     if (CPA_STATUS_SUCCESS == status)
     {
-
         memset(pOpData, 0, sizeof(CpaDcDpOpData));
 
         pOpData->bufferLenToCompress = src_len - ZLIB_HEAD_SZ;
@@ -1060,12 +1027,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 
     if (CPA_STATUS_SUCCESS == status)
     {
-
 	// wait for bigger packets longer but at lease 0.5 sec
         timeout = getTimeoutMs(dest_len, QAT_MAX_BUF_SIZE_DECOMP);
 
 	status = waitForCompletion(dcInstHandle, pOpData, polled, timeout);
-
     }
 
     /*
@@ -1139,9 +1104,12 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 * convert GZIP compression level to QAT DC
 *
 *************************************************************************/
-static inline CpaDcCompLvl compLevel(int level) {
+static inline CpaDcCompLvl 
+compLevel(const int level) 
+{
 
-    switch (level) {
+    switch (level) 
+    {
 	case 1: return CPA_DC_L1;
 	case 2: return CPA_DC_L2;
 	case 3: return CPA_DC_L3;
@@ -1153,6 +1121,7 @@ static inline CpaDcCompLvl compLevel(int level) {
 	case 9: return CPA_DC_L9;
     }
 
+    // above level 4 no significant compression ratio increase observed
     return CPA_DC_L4;
 }
 
@@ -1259,14 +1228,17 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
     /*
      * Set the address translation function for the instance
      */
-    if (CPA_STATUS_SUCCESS == status) {
+    if (CPA_STATUS_SUCCESS == status) 
+    {
         status = cpaDcSetAddressTranslation(dcInstHandle, (void *)virt_to_phys);
     }
 
     /* Start DataCompression component */
-    if (CPA_STATUS_SUCCESS == status) {
+    if (CPA_STATUS_SUCCESS == status) 
+    {
         status = cpaDcStartInstance(dcInstHandle, numInterBufs, &bufferInterArray);
-	if (CPA_STATUS_SUCCESS != status) {
+	if (CPA_STATUS_SUCCESS != status) 
+	{
 	    printk(KERN_CRIT LOG_PREFIX "failed to start instance with %d buffers of %d (status=%d)\n", 
 		numInterBufs, 2 * bufSize, status);
 	}
@@ -1336,7 +1308,8 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
         status = cpaDcDpInitSession(dcInstHandle,
                                     sessionHdl, /* session memory */
                                     &sd);       /* session setup data */
-        if (CPA_STATUS_SUCCESS != status) {
+        if (CPA_STATUS_SUCCESS != status) 
+        {
     	    printk(KERN_CRIT LOG_PREFIX "failed to init session (status=%d)\n", status);
         }
     }
@@ -1387,9 +1360,9 @@ failed:
     QAT_STAT_BUMP(init_failed);
     int failed = atomic_inc_return(&numInitFailed);
 
-    if (zfs_qat_init_failure_threshold > 0 && failed >= zfs_qat_init_failure_threshold) {
-
-    	printk(KERN_ALERT LOG_PREFIX "disabled because number of failed initializations %d is equal or greater then threshold %d\n",
+    if (zfs_qat_init_failure_threshold > 0 && failed >= zfs_qat_init_failure_threshold) 
+    {
+	printk(KERN_ALERT LOG_PREFIX "disabled because number of failed initializations %d is equal or greater then threshold %d\n",
                     failed, zfs_qat_init_failure_threshold);
 
         zfs_qat_disable_compression = 1;
@@ -1397,7 +1370,6 @@ failed:
     }
 
     return ret;
-
 }
 
 /*************************************************************************
@@ -1406,11 +1378,12 @@ failed:
 *
 *************************************************************************/
 qat_compress_status_t
-qat_compress(qat_compress_dir_t dir, int level, char *src, int src_len, char *dest, int dest_len, size_t *c_len) {
+qat_compress(const qat_compress_dir_t dir, const int level, const char *src, const int src_len, char *dest, const int dest_len, size_t *c_len) 
+{
 
     qat_compress_status_t ret = QAT_COMPRESS_FAIL;
 
-    unsigned long start = jiffies;
+    const unsigned long start = jiffies;
 
     switch (dir) 
     {
