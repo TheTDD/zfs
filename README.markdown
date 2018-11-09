@@ -56,7 +56,7 @@ err_op_unknown                  4    0
 throughput_comp_bps             4    34291110
 throughput_decomp_bps           4    416605000
 ```
-Implementation of QAT encryption and checksums using Crypto Data Plane operations follows after release of ZoL 0.8.
+Implementation of QAT encryption and checksums using Crypto Data Plane operations follows. Please stay tuned.
 
 ![img](http://zfsonlinux.org/images/zfs-linux.png)
 
