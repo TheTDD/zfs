@@ -49,10 +49,10 @@ abd_checksum_SHA256(abd_t *abd, uint64_t size,
 	SHA2_CTX ctx;
 	zio_cksum_t tmp;
 
-	if (qat_digest_use_accel(QAT_DIGEST_SHA256, size)) 
+	if (qat_digest_use_accel(QAT_DIGEST_SHA2_256, size)) 
 	{
 	    uint8_t *buf = abd_borrow_buf_copy(abd, size);
-	    qat_digest_status_t ret = qat_digest(QAT_DIGEST_SHA256, buf, size, &tmp);
+	    qat_digest_status_t ret = qat_digest(QAT_DIGEST_SHA2_256, buf, size, &tmp);
 	    abd_return_buf(abd, buf, size);
 	    
 	    if (ret == QAT_DIGEST_SUCCESS) 

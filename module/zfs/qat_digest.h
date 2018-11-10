@@ -29,20 +29,19 @@ typedef enum qat_digest_status {
 } qat_digest_status_t;
 
 typedef enum qat_digest_type {
-	QAT_DIGEST_WRONG = 0,
-	QAT_DIGEST_SHA256 = 1,
-	QAT_DIGEST_SHA512 = 2,
+	QAT_DIGEST_SHA2_256 = 2,
+	QAT_DIGEST_SHA3_256 = 3,
 } qat_digest_type_t;
 
-#define SHA256_DIGEST_LENGTH 32
-#define SHA512_DIGEST_LENGTH 64
+#define SHA2_256_DIGEST_LENGTH 32
+#define SHA3_256_DIGEST_LENGTH 32
 
 #if defined(_KERNEL) && defined(HAVE_QAT)
 #include <sys/zio.h>
 #include <cpa.h>
 #include <lac/cpa_cy_sym_dp.h>
 
-#define QAT_DIGEST_ENABLE_SHA512	0
+#define QAT_DIGEST_ENABLE_SHA3_256	0
 
 extern int qat_digest_init(void);
 extern void qat_digest_fini(void);

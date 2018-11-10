@@ -58,44 +58,49 @@ typedef struct qat_stats {
 	/*
 	 * Number of jobs submitted to qat crypto engine.
 	 */
-	kstat_named_t sha256_requests;
+	kstat_named_t sha2_256_requests;
 	/*
 	 * Total bytes sent to qat crypto engine.
 	 */
-	kstat_named_t sha256_total_in_bytes;
-	kstat_named_t sha256_total_success_bytes;
+	kstat_named_t sha2_256_total_in_bytes;
+	kstat_named_t sha2_256_total_success_bytes;
 	/*
 	 * Total bytes output from qat crypto engine.
 	 */
-	kstat_named_t sha256_total_out_bytes;
+	kstat_named_t sha2_256_total_out_bytes;
 
 	/*
 	 * Number of digest calculations fails in qat engine.
 	 * Note: when qat fail happens, it does mean a critical hardware
 	 * or software issue
 	 */
-	kstat_named_t sha256_fails;
+	kstat_named_t sha2_256_fails;
 
-#if QAT_DIGEST_ENABLE_SHA512
+	kstat_named_t sha2_256_throughput_bps;
+
+#if QAT_DIGEST_ENABLE_SHA3_256
 	/*
 	 * Number of jobs submitted to qat crypto engine.
 	 */
-	kstat_named_t sha512_requests;
+	kstat_named_t sha3_256_requests;
 	/*
 	 * Total bytes sent to qat crypto engine.
 	 */
-	kstat_named_t sha512_total_in_bytes;
-	kstat_named_t sha512_total_success_bytes;
+	kstat_named_t sha3_256_total_in_bytes;
+	kstat_named_t sha3_256_total_success_bytes;
 	/*
 	 * Total bytes output from qat crypto engine.
 	 */
-	kstat_named_t sha512_total_out_bytes;
+	kstat_named_t sha3_256_total_out_bytes;
 	/*
 	 * Number of digest calculations fails in qat engine.
 	 * Note: failed decompression is the software issue or 
 	 * it does mean a critical hardwar issue.
 	 */
-	kstat_named_t sha512_fails;
+	kstat_named_t sha3_256_fails;
+
+	kstat_named_t sha3_256_throughput_bps;
+
 #endif
 	kstat_named_t err_timeout;
 
@@ -108,30 +113,26 @@ typedef struct qat_stats {
         kstat_named_t err_status_restarting;
         kstat_named_t err_status_unknown;
 
-	kstat_named_t throughput_sha256_bps;
-
-#if QAT_DIGEST_ENABLE_SHA512
-	kstat_named_t throughput_sha512_bps;
-#endif
-
 } qat_stats_t;
 
 qat_stats_t qat_cy_stats = {
 	{ "init_failed",			KSTAT_DATA_UINT64 },
 
-	{ "sha256_requests",			KSTAT_DATA_UINT64 },
-	{ "sha256_total_in_bytes",		KSTAT_DATA_UINT64 },
-	{ "sha256_total_success_bytes",		KSTAT_DATA_UINT64 },
-	{ "sha256_total_out_bytes",		KSTAT_DATA_UINT64 },
-	{ "sha256_fails",			KSTAT_DATA_UINT64 },
+	{ "sha2_256_requests",			KSTAT_DATA_UINT64 },
+	{ "sha2_256_total_in_bytes",		KSTAT_DATA_UINT64 },
+	{ "sha2_256_total_success_bytes",	KSTAT_DATA_UINT64 },
+	{ "sha2_256_total_out_bytes",		KSTAT_DATA_UINT64 },
+	{ "sha2_256_fails",			KSTAT_DATA_UINT64 },
+	{ "sha2_256_throughput_bps",		KSTAT_DATA_UINT64 },
 
-#if QAT_DIGEST_ENABLE_SHA512
+#if QAT_DIGEST_ENABLE_SHA3_256
 
-	{ "sha512_requests",			KSTAT_DATA_UINT64 },
-	{ "sha512_total_in_bytes",		KSTAT_DATA_UINT64 },
-	{ "sha512_total_success_bytes",		KSTAT_DATA_UINT64 },
-	{ "sha512_total_out_bytes",		KSTAT_DATA_UINT64 },
-	{ "sha512_fails",			KSTAT_DATA_UINT64 },
+	{ "sha3_256_requests",			KSTAT_DATA_UINT64 },
+	{ "sha3_256_total_in_bytes",		KSTAT_DATA_UINT64 },
+	{ "sha3_256_total_success_bytes",	KSTAT_DATA_UINT64 },
+	{ "sha3_256_total_out_bytes",		KSTAT_DATA_UINT64 },
+	{ "sha3_256_fails",			KSTAT_DATA_UINT64 },
+	{ "sha3_256_throughput_bps",		KSTAT_DATA_UINT64 },
 
 #endif
 	{ "err_timeout",			KSTAT_DATA_UINT64 },
@@ -145,26 +146,21 @@ qat_stats_t qat_cy_stats = {
         { "err_status_restarting",              KSTAT_DATA_UINT64 },
         { "err_status_unknown",                 KSTAT_DATA_UINT64 },
 
-	{ "throughput_sha256_bps",		KSTAT_DATA_UINT64 },
-
-#if QAT_DIGEST_ENABLE_SHA512
-	{ "throughput_sha512_bps",		KSTAT_DATA_UINT64 },
-#endif	
 };
 
 static kstat_t *qat_ksp;
 
-int zfs_qat_disable_sha256 = 0;
-#if QAT_DIGEST_ENABLE_SHA512
-int zfs_qat_disable_sha512 = 0;
+int zfs_qat_disable_sha2_256 = 0;
+#if QAT_DIGEST_ENABLE_SHA3_256
+int zfs_qat_disable_sha3_256 = 0;
 #endif
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t instNum = ATOMIC_INIT(0);
 
-static volatile uint64_t sha256TimeUs = 0;
-#if QAT_DIGEST_ENABLE_SHA512
-static volatile uint64_t sha512TimeUs = 0;
+static volatile uint64_t sha2_256TimeUs = 0;
+#if QAT_DIGEST_ENABLE_SHA3_256
+static volatile uint64_t sha3_256TimeUs = 0;
 #endif
 
 #define	QAT_STAT_INCR(stat, val) \
@@ -175,23 +171,27 @@ static volatile uint64_t sha512TimeUs = 0;
 #define USEC_IN_SEC	1000000UL
 
 static inline void 
-updateThroughputSha256(const uint64_t start, const uint64_t end) {
+updateThroughputSha2_256(const uint64_t start, const uint64_t end) {
     const unsigned long us = jiffies_to_usecs(end - start);
-    const uint64_t time = atomic_add_64_nv(&sha256TimeUs, us);
+    const uint64_t time = atomic_add_64_nv(&sha2_256TimeUs, us);
     if (time > 0) {
-        const uint64_t processed = qat_cy_stats.sha256_total_success_bytes.value.ui64;
-	atomic_swap_64(&qat_cy_stats.throughput_sha256_bps.value.ui64, USEC_IN_SEC * processed / time);
+        const uint64_t processed = qat_cy_stats.sha2_256_total_success_bytes.value.ui64;
+	if (processed > 0) {
+    	    atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, USEC_IN_SEC * processed / time);
+    	}
     }
 }
 
-#if QAT_DIGEST_ENABLE_SHA512
+#if QAT_DIGEST_ENABLE_SHA3_256
 static inline void 
-updateThroughputSha512(const uint64_t start, const uint64_t end) {
+updateThroughputSha3_256(const uint64_t start, const uint64_t end) {
     const unsigned long us = jiffies_to_usecs(end - start);
-    const uint64_t time = atomic_add_64_nv(&sha512TimeUs, us);
+    const uint64_t time = atomic_add_64_nv(&sha3_256TimeUs, us);
     if (time > 0) {
-	const uint64_t processed = qat_cy_stats.sha512_total_success_bytes.value.ui64;
-	atomic_swap_64(&qat_cy_stats.throughput_sha512_bps.value.ui64, USEC_IN_SEC * processed / time);
+	const uint64_t processed = qat_cy_stats.sha3_256_total_success_bytes.value.ui64;
+	if (processed > 0) {
+    	    atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, USEC_IN_SEC * processed / time);
+    	}
     }
 }
 #endif
@@ -241,14 +241,14 @@ qat_digest_use_accel(const qat_digest_type_t dir, const size_t s_len)
 
     switch (dir) 
     {
-	case QAT_DIGEST_SHA256:
-	    ret = (0 == zfs_qat_disable_sha256) &&
+	case QAT_DIGEST_SHA2_256:
+	    ret = (0 == zfs_qat_disable_sha2_256) &&
 		(QAT_MIN_BUF_SIZE <= s_len && s_len <= QAT_MAX_BUF_SIZE);
 	    break;
 	    
-#if QAT_DIGEST_ENABLE_SHA512
-	case QAT_DIGEST_SHA512:
-	    ret = (0 == zfs_qat_disable_sha512) &&
+#if QAT_DIGEST_ENABLE_SHA3_256
+	case QAT_DIGEST_SHA3_256:
+	    ret = (0 == zfs_qat_disable_sha3_256) &&
 		(QAT_MIN_BUF_SIZE <= s_len && s_len <= QAT_MAX_BUF_SIZE);
 	    break;
 #endif	    
@@ -478,7 +478,7 @@ getInstance(CpaInstanceHandle *instance)
             goto done;
     }
 
-    status = PHYS_CONTIG_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
+    status = VIRT_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
     if (status != CPA_STATUS_SUCCESS) 
     {
             printk(KERN_CRIT LOG_PREFIX "failed allocate space for instances, num_inst=%d (status=%d)\n", num_inst, status);
@@ -500,7 +500,7 @@ getInstance(CpaInstanceHandle *instance)
 
 done:
 
-    PHYS_CONTIG_FREE(handles);
+    VIRT_FREE(handles);
 
     return status;
 
@@ -529,12 +529,12 @@ getDigestLength(const CpaCySymHashAlgorithm algo, Cpa32U *length)
     switch (algo)
     {
 	case CPA_CY_SYM_HASH_SHA256:
-	    *length = SHA256_DIGEST_LENGTH;
+	    *length = SHA2_256_DIGEST_LENGTH;
 	    break;
 
-#if QAT_DIGEST_ENABLE_SHA512
-	case CPA_CY_SYM_HASH_SHA512:
-	    *length = SHA512_DIGEST_LENGTH;
+#if QAT_DIGEST_ENABLE_SHA3_256
+	case CPA_CY_SYM_HASH_SHA3_256:
+	    *length = SHA3_256_DIGEST_LENGTH;
 	    break;
 #endif
 
@@ -552,14 +552,14 @@ registerIncomingRequest(const CpaCySymHashAlgorithm algo, const int src_len) {
 
     switch (algo) {
 	case CPA_CY_SYM_HASH_SHA256:
-	    QAT_STAT_BUMP(sha256_requests);
-	    QAT_STAT_INCR(sha256_total_in_bytes, src_len);
+	    QAT_STAT_BUMP(sha2_256_requests);
+	    QAT_STAT_INCR(sha2_256_total_in_bytes, src_len);
 	    break;
 
-#if QAT_DIGEST_ENABLE_SHA512
-	case CPA_CY_SYM_HASH_SHA512:
-	    QAT_STAT_BUMP(sha512_requests);
-	    QAT_STAT_INCR(sha512_total_in_bytes, src_len);
+#if QAT_DIGEST_ENABLE_SHA3_256
+	case CPA_CY_SYM_HASH_SHA3_256:
+	    QAT_STAT_BUMP(sha3_256_requests);
+	    QAT_STAT_INCR(sha3_256_total_in_bytes, src_len);
 	    break;
 #endif
 
@@ -575,12 +575,12 @@ registerFailedRequest(const CpaCySymHashAlgorithm algo) {
     switch (algo) 
     {
 	case CPA_CY_SYM_HASH_SHA256:
-	    QAT_STAT_BUMP(sha256_fails);
+	    QAT_STAT_BUMP(sha2_256_fails);
 	    break;
 
-#if QAT_DIGEST_ENABLE_SHA512
-	case CPA_CY_SYM_HASH_SHA512:
-	    QAT_STAT_BUMP(sha512_fails);
+#if QAT_DIGEST_ENABLE_SHA3_256
+	case CPA_CY_SYM_HASH_SHA3_256:
+	    QAT_STAT_BUMP(sha3_256_fails);
 	    break;
 #endif
 
@@ -597,14 +597,14 @@ registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, co
     switch (algo) 
     {
 	case CPA_CY_SYM_HASH_SHA256:
-	    QAT_STAT_INCR(sha256_total_success_bytes, src_len);
-	    QAT_STAT_INCR(sha256_total_out_bytes, dest_len);
+	    QAT_STAT_INCR(sha2_256_total_success_bytes, src_len);
+	    QAT_STAT_INCR(sha2_256_total_out_bytes, dest_len);
 	    break;
 
-#if QAT_DIGEST_ENABLE_SHA512
-	case CPA_CY_SYM_HASH_SHA512:
-	    QAT_STAT_INCR(sha512_total_success_bytes, src_len);
-	    QAT_STAT_INCR(sha512_total_out_bytes, dest_len);
+#if QAT_DIGEST_ENABLE_SHA3_256
+	case CPA_CY_SYM_HASH_SHA3_256:
+	    QAT_STAT_INCR(sha3_256_total_success_bytes, src_len);
+	    QAT_STAT_INCR(sha3_256_total_out_bytes, dest_len);
 	    break;
 #endif
 
@@ -619,7 +619,7 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
     const CpaCySymHashAlgorithm algo, const uint8_t *src, const int src_len, zio_cksum_t *dest) 
 {
      qat_digest_status_t ret = QAT_DIGEST_FAIL;
-     struct completion complete = {0};
+     struct completion *pComplete = NULL;
      unsigned long timeout = 0;
 
     CpaStatus status = CPA_STATUS_SUCCESS;
@@ -631,10 +631,15 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
     registerIncomingRequest(algo, src_len);
 
     status = getDigestLength(algo, &digestLength);
-
+    
     if (CPA_STATUS_SUCCESS == status)
     {
 	bufferSize += digestLength;
+    }
+
+    if (CPA_STATUS_SUCCESS == status && !polled) 
+    {
+	status = VIRT_ALLOC(&pComplete, sizeof(struct completion));
     }
 
     /* Allocate Src buffer */
@@ -684,8 +689,8 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 	}
 	else
 	{
-		init_completion(&complete);
-		pOpData->pCallbackTag = (void *)&complete;
+		init_completion(pComplete);
+		pOpData->pCallbackTag = (void *)pComplete;
 	}
     
         /** Enqueue symmetric operation */
@@ -723,6 +728,7 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 
     PHYS_CONTIG_FREE(pSrcBuffer);
     PHYS_CONTIG_FREE(pOpData);
+    VIRT_FREE(pComplete);
 
     return (ret);
 }
@@ -738,7 +744,7 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
     CpaCySymSessionCtx sessionCtx = NULL;
     Cpa32U sessionCtxSize = 0;
     CpaInstanceHandle cyInstHandle = NULL;
-    CpaCySymSessionSetupData sessionSetupData = {0};
+    CpaCySymSessionSetupData *pSessionSetupData = NULL;
     // CpaCyCapabilitiesInfo cap = {0};
 
     boolean_t polled = B_FALSE;
@@ -815,22 +821,29 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 
     if (CPA_STATUS_SUCCESS == status)
     {
+	status = VIRT_ALLOC(&pSessionSetupData, sizeof(CpaCySymSessionSetupData));
+    }
+
+    if (CPA_STATUS_SUCCESS == status)
+    {
+	memset(pSessionSetupData, 0, sizeof(CpaCySymSessionSetupData));
+	
         /* populate symmetric session data structure */
-        sessionSetupData.sessionPriority = CPA_CY_PRIORITY_NORMAL;
-        sessionSetupData.symOperation = CPA_CY_SYM_OP_HASH,
-        sessionSetupData.hashSetupData.hashAlgorithm = algo;
-        sessionSetupData.hashSetupData.hashMode = CPA_CY_SYM_HASH_MODE_PLAIN;
-        sessionSetupData.hashSetupData.digestResultLenInBytes = digestLength;
+        pSessionSetupData->sessionPriority = CPA_CY_PRIORITY_NORMAL;
+        pSessionSetupData->symOperation = CPA_CY_SYM_OP_HASH,
+        pSessionSetupData->hashSetupData.hashAlgorithm = algo;
+        pSessionSetupData->hashSetupData.hashMode = CPA_CY_SYM_HASH_MODE_PLAIN;
+        pSessionSetupData->hashSetupData.digestResultLenInBytes = digestLength;
 
         /* Even though MAC follows immediately after the region to hash
            digestIsAppended is set to false in this case to workaround
            errata number IXA00378322 */
-        sessionSetupData.digestIsAppended = CPA_FALSE;
-        sessionSetupData.verifyDigest = CPA_FALSE;
+        pSessionSetupData->digestIsAppended = CPA_FALSE;
+        pSessionSetupData->verifyDigest = CPA_FALSE;
 
         /* Determine size of session context to allocate */
         status = cpaCySymDpSessionCtxGetSize(
-            cyInstHandle, &sessionSetupData, &sessionCtxSize);
+            cyInstHandle, pSessionSetupData, &sessionCtxSize);
     }
 
     if (CPA_STATUS_SUCCESS == status)
@@ -842,7 +855,7 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
     if (CPA_STATUS_SUCCESS == status)
     {
         /* Initialize the session */
-        status = cpaCySymDpInitSession(cyInstHandle, &sessionSetupData, sessionCtx);
+        status = cpaCySymDpInitSession(cyInstHandle, pSessionSetupData, sessionCtx);
     }
 
     if (CPA_STATUS_SUCCESS == status)
@@ -869,6 +882,8 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 
     /* Clean up */
 
+    VIRT_FREE(pSessionSetupData);
+
     /* Free session Context */
     PHYS_CONTIG_FREE(sessionCtx);
 
@@ -887,9 +902,9 @@ failed:
 	printk(KERN_ALERT LOG_PREFIX "disabled because number of failed initializations %d is equal or greater then threshold %d\n",
                     failed, zfs_qat_init_failure_threshold);
 
-        zfs_qat_disable_sha256 = 1;
-#if QAT_DIGEST_ENABLE_SHA512
-        zfs_qat_disable_sha512 = 1;
+        zfs_qat_disable_sha2_256 = 1;
+#if QAT_DIGEST_ENABLE_SHA3_256
+        zfs_qat_disable_sha3_256 = 1;
 #endif        
     }
 
@@ -914,22 +929,22 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
     switch (type) 
     {
 
-        case QAT_DIGEST_SHA256:
+        case QAT_DIGEST_SHA2_256:
 	    // printk(KERN_ALERT LOG_PREFIX "just info, requested to compress %d bytes to buffer size %d\n", src_len, dest_len);
             ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA256, src, src_len, dest);
 	    if (QAT_DIGEST_SUCCESS == ret)
 	    {
-		updateThroughputSha256(start, jiffies);
+		updateThroughputSha2_256(start, jiffies);
 	    }
             break;
 
-#if QAT_DIGEST_ENABLE_SHA512
-        case QAT_DIGEST_SHA512:
+#if QAT_DIGEST_ENABLE_SHA3_256
+        case QAT_DIGEST_SHA3_256:
 	    // printk(KERN_ALERT LOG_PREFIX "just info, requested to decompress %d bytes to buffer size %d\n", src_len, dest_len);
-            ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA512, src, src_len, dest);
+            ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA3_256, src, src_len, dest);
 	    if (QAT_DIGEST_SUCCESS == ret)
 	    {
-		updateThroughputSha512(start, jiffies);
+		updateThroughputSha3_256(start, jiffies);
 	    }
             break;
 #endif
@@ -942,12 +957,12 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 }
 
 
-module_param(zfs_qat_disable_sha256, int, 0644);
-MODULE_PARM_DESC(zfs_qat_disable_sha256, "Disable SHA256 digest calculations");
+module_param(zfs_qat_disable_sha2_256, int, 0644);
+MODULE_PARM_DESC(zfs_qat_disable_sha2_256, "Disable SHA2-256 digest calculations");
 
-#if QAT_DIGEST_ENABLE_SHA512
-module_param(zfs_qat_disable_sha512, int, 0644);
-MODULE_PARM_DESC(zfs_qat_disable_sha512, "Disable SHA512 digest calculations");
+#if QAT_DIGEST_ENABLE_SHA3_256
+module_param(zfs_qat_disable_sha3_256, int, 0644);
+MODULE_PARM_DESC(zfs_qat_disable_sha3_256, "Disable SHA3-256 digest calculations");
 #endif
 
 #endif
