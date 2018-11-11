@@ -28,12 +28,8 @@ typedef enum qat_compress_status {
 	QAT_COMPRESS_UNCOMPRESSIBLE = 2,
 } qat_compress_status_t;
 
-
 #if defined(_KERNEL) && defined(HAVE_QAT)
 #include <sys/zio.h>
-// #include "cpa.h"
-// #include "dc/cpa_dc.h"
-
 typedef enum qat_compress_dir {
 	QAT_COMPRESS = 0,
 	QAT_DECOMPRESS = 1,
@@ -44,12 +40,14 @@ extern void qat_compress_fini(void);
 extern boolean_t qat_use_accel(const qat_compress_dir_t dir, const size_t s_len);
 extern qat_compress_status_t qat_compress(const qat_compress_dir_t dir, const int level, const char *src, const int src_len,
     char *dst, const int dst_len, size_t *c_len);
+
 #else
-#define	CPA_STATUS_SUCCESS	0
+
 #define	qat_compress_init()
 #define	qat_compress_fini()
-#define	qat_use_accel(dir, s_len)	B_FALSE
+#define	qat_use_accel(dir, s_len)			B_FALSE
 #define	qat_compress(dir, lvl, s, sl, d, dl, cl)	QAT_COMPRESS_FAIL
+
 #endif
 
 #endif /* _SYS_QAT_COMPRESS_H */

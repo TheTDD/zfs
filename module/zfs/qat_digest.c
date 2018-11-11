@@ -36,10 +36,10 @@
 #include "qat_digest.h"
 
 /*
- * Timeout - no response from hardware after 0.5 - 5 seconds
+ * Timeout - no response from hardware after 0.5 - 3 seconds
  */
 #define	TIMEOUT_MS_MIN		500
-#define TIMEOUT_MS_MAX		5000
+#define TIMEOUT_MS_MAX		3000
 
 #define	QAT_MIN_BUF_SIZE	(2*1024)
 #define	QAT_MAX_BUF_SIZE	(1024*1024)
@@ -76,6 +76,7 @@ typedef struct qat_stats {
 	 */
 	kstat_named_t sha2_256_fails;
 
+	/* sha2-235 throughput in bytes-per-sec */
 	kstat_named_t sha2_256_throughput_bps;
 
 #if QAT_DIGEST_ENABLE_SHA3_256
@@ -99,9 +100,13 @@ typedef struct qat_stats {
 	 */
 	kstat_named_t sha3_256_fails;
 
+	/* sha3-256 throughput in bytes-per-sec */
 	kstat_named_t sha3_256_throughput_bps;
 
 #endif
+	/* number of times unlocked instance was not available */
+	kstat_named_t err_no_instance_available;
+
 	kstat_named_t err_timeout;
 
         /* values of status error codes */
@@ -135,6 +140,7 @@ qat_stats_t qat_cy_stats = {
 	{ "sha3_256_throughput_bps",		KSTAT_DATA_UINT64 },
 
 #endif
+	{ "err_no_instance_available",		KSTAT_DATA_UINT64 },
 	{ "err_timeout",			KSTAT_DATA_UINT64 },
 
 	// from operations
@@ -148,7 +154,12 @@ qat_stats_t qat_cy_stats = {
 
 };
 
+/* maximum number of Cy-Sym instances on one QAT controller */
+#define MAX_INSTANCES 128
+
 static kstat_t *qat_ksp;
+static atomic_t initialized = ATOMIC_INIT(0);
+static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };;
 
 int zfs_qat_disable_sha2_256 = 0;
 #if QAT_DIGEST_ENABLE_SHA3_256
@@ -171,8 +182,33 @@ static volatile uint64_t sha3_256TimeUs = 0;
 #define USEC_IN_SEC	1000000UL
 
 static inline void 
+lock_instance(Cpa16U i) 
+{
+    atomic_inc(&instance_lock[i]);
+}
+
+
+static inline boolean_t 
+is_instance_locked(Cpa16U i) 
+{
+    boolean_t ret;
+
+    ret = (0 != atomic_read(&instance_lock[i]));
+    return (ret);
+}
+
+static inline void 
+unlock_instance(Cpa16U i) 
+{
+    smp_mb__before_atomic();
+    atomic_dec(&instance_lock[i]);
+    smp_mb__after_atomic();
+    
+}
+
+static inline void 
 updateThroughputSha2_256(const uint64_t start, const uint64_t end) {
-    const unsigned long us = jiffies_to_usecs(end - start);
+    const uint64_t us = jiffies_to_usecs(end - start);
     const uint64_t time = atomic_add_64_nv(&sha2_256TimeUs, us);
     if (time > 0) {
         const uint64_t processed = qat_cy_stats.sha2_256_total_success_bytes.value.ui64;
@@ -185,7 +221,7 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end) {
 #if QAT_DIGEST_ENABLE_SHA3_256
 static inline void 
 updateThroughputSha3_256(const uint64_t start, const uint64_t end) {
-    const unsigned long us = jiffies_to_usecs(end - start);
+    const uint64_t us = jiffies_to_usecs(end - start);
     const uint64_t time = atomic_add_64_nv(&sha3_256TimeUs, us);
     if (time > 0) {
 	const uint64_t processed = qat_cy_stats.sha3_256_total_success_bytes.value.ui64;
@@ -209,15 +245,21 @@ qat_digest_init(void)
 	{
 		qat_ksp->ks_data = &qat_cy_stats;
 		kstat_install(qat_ksp);
-	}
 
-	if (CPA_STATUS_SUCCESS == cpaCyGetNumInstances(&numInstances) && numInstances > 0)
-	{
-	    printk(KERN_INFO LOG_PREFIX "started with %d CY instances\n", numInstances);
+		atomic_inc(&initialized);
+
+	    if (CPA_STATUS_SUCCESS == cpaCyGetNumInstances(&numInstances) && numInstances > 0)
+	    {
+		printk(KERN_INFO LOG_PREFIX "started with %ld CY instances\n", min((long)numInstances,(long)MAX_INSTANCES));
+	    }
+	    else
+	    {
+		printk(KERN_INFO LOG_PREFIX "initialized\n");
+	    }
 	}
 	else
 	{
-	    printk(KERN_INFO LOG_PREFIX "initialized\n");
+	    printk(KERN_ALERT LOG_PREFIX "initialization failed\n");
 	}
 
 	return 0;
@@ -228,6 +270,8 @@ qat_digest_fini(void)
 {
 	if (qat_ksp != NULL) 
 	{
+		atomic_dec(&initialized);
+
 		kstat_delete(qat_ksp);
 		qat_ksp = NULL;
 	}
@@ -239,8 +283,10 @@ qat_digest_use_accel(const qat_digest_type_t dir, const size_t s_len)
 
     boolean_t ret = B_FALSE;
 
-    switch (dir) 
+    if (atomic_read(&initialized) > 0)
     {
+	switch (dir) 
+	{
 	case QAT_DIGEST_SHA2_256:
 	    ret = (0 == zfs_qat_disable_sha2_256) &&
 		(QAT_MIN_BUF_SIZE <= s_len && s_len <= QAT_MAX_BUF_SIZE);
@@ -255,6 +301,7 @@ qat_digest_use_accel(const qat_digest_type_t dir, const size_t s_len)
 	default:
 	    // impossible
 	    break;;
+	}
     }
 
     return (ret);
@@ -312,11 +359,11 @@ qat_cy_callback_polled(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean v
     pOpData->pCallbackTag = (void *)1;
 }
 
-static inline unsigned long
+static inline uint32_t
 getTimeoutMs(const int dataSize, const int maxSize) 
 {
 
-    unsigned long timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
+    uint32_t timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
     return timeout;
 
 }
@@ -415,8 +462,6 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *
 		break;
     	    }
 
-	    yield();
-
     	    status = icp_sal_CyPollDpInstance(dcInstHandle, 1);
     	} 
     	while (
@@ -429,7 +474,7 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *
 	struct completion *complete = (struct completion*)pOpData->pCallbackTag;
 
     	/* we now wait until the completion of the operation using interrupts */
-    	if (!wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) 
+    	if (0 == wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) 
     	{
 
 	    CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
@@ -461,12 +506,13 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *
  * Loading available DC instances and select next one
  */
 static CpaStatus
-getInstance(CpaInstanceHandle *instance) 
+getInstance(CpaInstanceHandle *instance, int *instanceNum) 
 {
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa16U num_inst = 0;
-    int i = 0;
+    int inst = 0;
+    boolean_t instanceFound = B_FALSE;
 
     CpaInstanceHandle *handles = NULL;
 
@@ -476,6 +522,11 @@ getInstance(CpaInstanceHandle *instance)
             printk(KERN_ALERT LOG_PREFIX "failed counting instances, num_inst=%d, num_failed=%d (status=%d)\n",
                     num_inst, atomic_read(&numInitFailed), status);
             goto done;
+    }
+
+    if (num_inst > MAX_INSTANCES)
+    {
+	num_inst = MAX_INSTANCES;
     }
 
     status = VIRT_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
@@ -493,10 +544,25 @@ getInstance(CpaInstanceHandle *instance)
     }
 
     smp_mb__before_atomic();
-    i = atomic_inc_return(&instNum) % num_inst;
+    for (int i = 0; i < num_inst; i++) {
+	inst = atomic_inc_return(&instNum) % num_inst;
+	
+	if (!is_instance_locked(inst)) {
+    	    lock_instance(inst);
+	    instanceFound = B_TRUE;
+	    break;
+	}
+    }
     smp_mb__after_atomic();
 
-    *instance = handles[i];
+    if (!instanceFound) {
+	status = CPA_STATUS_RESOURCE;
+	printk(KERN_WARNING LOG_PREFIX "failed to find free CY instance ouf of %d, consider to increase number of instances in [KERNEL_QAT] section", num_inst);
+	QAT_STAT_BUMP(err_no_instance_available);
+    } else {
+        *instance = handles[inst];
+        *instanceNum = inst;
+    }
 
 done:
 
@@ -749,12 +815,13 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 
     boolean_t polled = B_FALSE;
     Cpa32U digestLength = 0;
+    int instNum;
 
     /*
      * In this simplified version of instance discovery, we discover
      * exactly one instance of a crypto service.
      */
-    status = getInstance(&cyInstHandle);
+    status = getInstance(&cyInstHandle, &instNum);
     if (CPA_STATUS_SUCCESS != status || cyInstHandle == NULL)
     {
         goto failed;
@@ -790,15 +857,15 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 
     if (CPA_STATUS_SUCCESS == status) 
     {
-	status = isInstancePolled(cyInstHandle, &polled);
-    }
-
-    if (CPA_STATUS_SUCCESS == status) 
-    {
         /*
          * Set the address translation function for the instance
          */
         status = cpaCySetAddressTranslation(cyInstHandle, (void *)virt_to_phys);
+    }
+
+    if (CPA_STATUS_SUCCESS == status) 
+    {
+	status = isInstancePolled(cyInstHandle, &polled);
     }
 
     if (CPA_STATUS_SUCCESS == status)
@@ -868,7 +935,7 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
         /* Remove the session - session init has already succeeded */
 
         /* Wait for inflight requests before removing session */
-        symSessionWaitForInflightReq(sessionCtx);
+        // symSessionWaitForInflightReq(sessionCtx);
 
         sessionStatus = cpaCySymDpRemoveSession(cyInstHandle, sessionCtx);
 
@@ -888,6 +955,8 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
     PHYS_CONTIG_FREE(sessionCtx);
 
     cpaCyStopInstance(cyInstHandle);
+    
+    unlock_instance(instNum);
 
     return (ret);
 
@@ -897,7 +966,7 @@ failed:
     QAT_STAT_BUMP(init_failed);
     int failed = atomic_inc_return(&numInitFailed);
 
-    if (zfs_qat_init_failure_threshold > 0 && failed >= zfs_qat_init_failure_threshold) 
+    if (zfs_qat_init_failure_threshold > 0 && failed >= zfs_qat_init_failure_threshold)
     {
 	printk(KERN_ALERT LOG_PREFIX "disabled because number of failed initializations %d is equal or greater then threshold %d\n",
                     failed, zfs_qat_init_failure_threshold);
@@ -912,7 +981,6 @@ failed:
 
 }
 
-
 /*************************************************************************
 *
 * QAT digest entry point
@@ -921,7 +989,6 @@ failed:
 qat_digest_status_t
 qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, zio_cksum_t *dest) 
 {
-
     qat_digest_status_t ret = QAT_DIGEST_FAIL;
 
     const unsigned long start = jiffies;

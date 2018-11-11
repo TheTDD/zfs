@@ -22,7 +22,6 @@
 #ifndef	_SYS_QAT_DIGEST_H
 #define	_SYS_QAT_DIGEST_H
 
-
 typedef enum qat_digest_status {
 	QAT_DIGEST_SUCCESS = 0,
 	QAT_DIGEST_FAIL = 1,
@@ -38,8 +37,6 @@ typedef enum qat_digest_type {
 
 #if defined(_KERNEL) && defined(HAVE_QAT)
 #include <sys/zio.h>
-#include <cpa.h>
-#include <lac/cpa_cy_sym_dp.h>
 
 #define QAT_DIGEST_ENABLE_SHA3_256	0
 
@@ -55,11 +52,11 @@ extern qat_digest_status_t qat_digest(const qat_digest_type_t type, const uint8_
                CPA_CY_API_VERSION_NUM_MINOR >= minor))
 
 #else
-#define	CPA_STATUS_SUCCESS	0
+
 #define	qat_digest_init()
 #define	qat_digest_fini()
 #define	qat_digest_use_accel(type, s_len)	B_FALSE
-#define	qat_digest(type, s, sl, d)	QAT_DIGEST_FAIL
+#define	qat_digest(type, s, sl, d)		QAT_DIGEST_FAIL
 #endif
 
 #endif /* _SYS_QAT_DIGEST_H */
