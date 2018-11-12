@@ -1,0 +1,66 @@
+#!/bin/sh
+
+STAT=/proc/spl/kstat/zfs/qat-cy
+SHA2_256=/sys/module/zfs/parameters/zfs_qat_disable_sha2_256
+SHA3_256=/sys/module/zfs/parameters/zfs_qat_disable_sha3_256
+
+if [ -f $STAT ] ; then
+    cat $STAT
+else
+    echo ZFS is not using QAT-cy
+    exit
+fi
+
+if [ "-$1" == "-on" ] ; then
+
+    if [ -f $SHA2_256 ] ; then
+	echo 0 > $SHA2_256
+    fi
+    if [ -f $SHA3_256 ] ; then
+	echo 0 > $SHA3_256
+    fi
+
+    echo
+    echo QAT-cy set ON
+
+fi
+
+if [ "-$1" == "-off" ] ; then
+
+    if [ -f $SHA2_256 ] ; then
+	echo 1 > $SHA2_256
+    fi
+    if [ -f $SHA3_256 ] ; then
+	echo 1 > $SHA3_256
+    fi
+
+    echo
+    echo QAT-cy set OFF
+
+fi
+
+echo
+
+if [ -f $SHA2_256 ] ; then
+
+    echo -n "QAT-SHA2/256: "
+
+    if [ `cat $SHA2_256` == "0" ] ; then
+	echo ON
+    else
+	echo OFF
+    fi
+
+fi
+
+if [ -f $SHA3_256 ] ; then
+
+    echo -n "QAT-SHA3/256: "
+
+    if [ `cat $SHA3_256` == "0" ] ; then
+	echo ON
+    else
+	echo OFF
+    fi
+
+fi

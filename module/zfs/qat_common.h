@@ -56,6 +56,7 @@ extern void mem_free_virtual(void **ppMemAddr);
 #define ceil(n, d) (((n) < 0) ? (-((-(n))/(d))) : (n)/(d) + ((n)%(d) != 0))
 
 extern int zfs_qat_init_failure_threshold;
+extern int zfs_qat_disable;
 
 #endif // kernel/qat
 

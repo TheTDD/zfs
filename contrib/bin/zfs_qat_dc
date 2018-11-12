@@ -1,0 +1,91 @@
+#!/bin/sh
+
+STAT=/proc/spl/kstat/zfs/qat-dc
+COMP=/sys/module/zfs/parameters/zfs_qat_disable_compression
+DECOMP=/sys/module/zfs/parameters/zfs_qat_disable_decompression
+
+if [ -f $STAT ] ; then
+    cat $STAT
+else
+    echo ZFS is not using QAT/dc
+    exit
+fi
+
+
+if [ "-$1" == "-on" ] ; then
+
+    echo 0 > $COMP
+    echo 0 > $DECOMP
+
+    echo
+    echo QAT-dc set ON
+
+fi
+
+
+if [ "-$1" == "-off" ] ; then
+
+    echo 1 > $COMP
+    echo 1 > $DECOMP
+
+    echo
+    echo QAT-dc set OFF
+
+fi
+
+
+if [ "-$1" == "-con" ] ; then
+
+    echo 0 > $COMP
+
+    echo
+    echo QAT-Compression set ON
+
+fi
+
+
+if [ "-$1" == "-coff" ] ; then
+
+    echo 1 > $COMP
+
+    echo
+    echo QAT-Compression set OFF
+
+fi
+
+if [ "-$1" == "-don" ] ; then
+
+    echo 0 > $DECOMP
+
+    echo
+    echo QAT-Decompression set ON
+
+fi
+
+
+if [ "-$1" == "-doff" ] ; then
+
+    echo 1 > $DECOMP
+
+    echo
+    echo QAT-Decompression set OFF
+
+fi
+
+echo
+
+echo -n "QAT-Compression: "
+
+if [ `cat $COMP` == "0" ] ; then
+    echo ON
+else
+    echo OFF
+fi
+
+echo -n "QAT-Decompression: "
+
+if [ `cat $DECOMP` == "0" ] ; then
+    echo ON
+else
+    echo OFF
+fi
