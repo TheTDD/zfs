@@ -62,7 +62,14 @@
  * trees, leading to a poorer compression ratio.
  */
 
-#define	QAT_MIN_BUF_SIZE	(2*1024)
+/*
+Depending on the specifics of the particular algorithm and QAT API parameters, a
+relatively small decrease in performance may be observed for submission requests
+around a buffer/packet size of 2kB to 4kB. This is expected due to optimizations in the
+QAT software that can apply for requests of a certain size.
+*/
+
+#define	QAT_MIN_BUF_SIZE	(4*1024)
 #define	QAT_MAX_BUF_SIZE_COMP	(128*1024)
 #define QAT_MAX_BUF_SIZE_DECOMP (2*1024*1024)
 
@@ -1037,6 +1044,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
     unsigned long timeout = 0;
 
     // For decompression operations, the minimal destination buffer size should be 258 bytes.
+    // QATE-30865
     const Cpa32U bufferSize = max(258L, (long)dest_len);
     CpaFlatBuffer srcBuf = {0};
     CpaFlatBuffer destBuf = {0};

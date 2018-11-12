@@ -41,7 +41,14 @@
 #define	TIMEOUT_MS_MIN		500
 #define TIMEOUT_MS_MAX		3000
 
-#define	QAT_MIN_BUF_SIZE	(2*1024)
+/*
+Depending on the specifics of the particular algorithm and QAT API parameters, a
+relatively small decrease in performance may be observed for submission requests
+around a buffer/packet size of 2kB to 4kB. This is expected due to optimizations in the
+QAT software that can apply for requests of a certain size.
+*/
+
+#define	QAT_MIN_BUF_SIZE	(4*1024)
 #define	QAT_MAX_BUF_SIZE	(1024*1024)
 
 #define LOG_PREFIX "ZFS-QAT/cy: "
@@ -599,12 +606,15 @@ static inline void
 symSessionWaitForInflightReq(CpaCySymSessionCtx pSessionCtx)
 {
 
-/* Session reuse is available since Cryptographic API version 2.2 */
+/* Session in use is available since Cryptographic API version 2.2 */
 #if CY_API_VERSION_AT_LEAST(2, 2)
     CpaBoolean sessionInUse = CPA_FALSE;
     do
     {
         cpaCySymSessionInUse(pSessionCtx, &sessionInUse);
+        if (CPA_TRUE == sessionInUse) {
+    	    yield();
+        }
     } while (sessionInUse);
 #endif
     return;
@@ -959,8 +969,9 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
         /* Remove the session - session init has already succeeded */
 
         /* Wait for inflight requests before removing session */
-        // symSessionWaitForInflightReq(sessionCtx);
+        symSessionWaitForInflightReq(sessionCtx);
 
+        /* cpaCySymRemoveSession will fail if there are outstanding request for the session that the user is trying to remove */
         sessionStatus = cpaCySymDpRemoveSession(cyInstHandle, sessionCtx);
 
         /* maintain status of remove session only when status of all operations

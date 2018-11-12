@@ -32,8 +32,13 @@
 
 #include <cpa.h>
 
+/*
+* INTEL: For optimal performance, data pointers should be 8-byte aligned. In some cases this is a
+* requirement, while in most other cases, it is a recommendation for performance.
+*/
+
 #define	PHYS_CONTIG_ALLOC(pp_mem_addr, size_bytes)	\
-	mem_alloc_contig((void *)(pp_mem_addr), (size_bytes), 1)
+	mem_alloc_contig((void *)(pp_mem_addr), (size_bytes), 8)
 
 #define PHYS_CONTIG_ALLOC_ALIGNED(ppMemAddr, sizeBytes, alignment)	\
 	mem_alloc_contig((void *)(ppMemAddr), (sizeBytes), (alignment))
