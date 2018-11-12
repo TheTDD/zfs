@@ -12,7 +12,8 @@ News on this release:
 - extended statistics includes throughput and counts of errors and operation status
 - implementation is intesively using kernel contiguous memory for flat source and destination buffers, please configure your usdm_drv correspondingly (see `modinfo usdm_drv`)
 - qat compression, decompression and checksum can be disabled independently (for by example benchmarking, comparing with sw-implementation or development/debugging purposes)
-- QAT support disables itself automatically if can't initialize DC/CY instances after configurable number of requests (default 100). The threshold is configurable by zfs module parameter
+- access to QAT can be disabled completely with `zfs_qat_disable` parameter
+- QAT support disables itself automatically (independent for DC and CY) if can't initialize corresponding DC or CY instances after configurable number of requests (default 100). The threshold is configurable by zfs module parameter.
 
 # ZFS module parameters
 ```
@@ -22,6 +23,7 @@ parm:           zfs_qat_disable_sha2_256:Disable SHA2-256 digest calculations (i
 parm:           zfs_qat_disable_compression:Disable QAT compression (int)
 parm:           zfs_qat_disable_decompression:Disable QAT decompression (int)
 parm:           zfs_qat_init_failure_threshold:Threshold (number of init failures) to consider disabling QAT (int)
+parm:           zfs_qat_disable:completely disable any access to QAT (int)
 ```
 
 # ZFS module statistics compression
@@ -78,6 +80,30 @@ err_status_param                4    0
 err_status_resource             4    0
 err_status_restarting           4    0
 err_status_unknown              4    0
+```
+
+This build of ZFS is since 2018-11-11 in production environment with 10TB ZFS-Pool:
+
+```
+# zpool iostat -v
+                                                  capacity     operations     bandwidth 
+pool                                            alloc   free   read  write   read  write
+----------------------------------------------  -----  -----  -----  -----  -----  -----
+srv                                             5.88T  5.00T     21     80  1.27M  2.55M
+  mirror                                        2.51T  1.12T      9     25   538K   648K
+    ata-WDC_WD4002FYYZ-01B7CB0_K3GDHW1B             -      -      4     12   273K   324K
+    ata-WDC_WD4002FYYZ-01B7CB0_K4KGXS3B             -      -      5     12   266K   324K
+  mirror                                        3.31T   333G      6     26   441K   407K
+    ata-ST4000NM0035-1V4107_ZC12DB9P                -      -      3     13   219K   203K
+    ata-ST4000NM0035-1V4107_ZC12DAN7                -      -      3     13   221K   203K
+  mirror                                        68.4G  3.56T      5     16   318K   793K
+    ata-TOSHIBA_MG03ACA400_5387K02LF                -      -      3      9   170K   396K
+    ata-WDC_WD4000FYYZ-01UL1B1_WD-WCC130727209      -      -      2      7   148K   396K
+logs                                                -      -      -      -      -      -
+  cc52ce29-2cfc-4a6e-81af-04f055d3e23d           892K  1.98G      0     11      6   762K
+cache                                               -      -      -      -      -      -
+  nvme-INTEL_SSDPEKKW128G8_BTHH81850QJP128A      956M   118G      1      5  3.87K  22.7K
+----------------------------------------------  -----  -----  -----  -----  -----  -----
 ```
 
 Implementation of QAT encryption using Crypto Data Plane operations follows. Please stay tuned.
