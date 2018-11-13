@@ -24,7 +24,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
-#include <linux/completion.h>
+// #include <linux/completion.h>
 #include <sys/zfs_context.h>
 
 #include <cpa.h>
@@ -35,13 +35,38 @@
 #define ADDR_LEN uint32_t
 #endif
 
-CpaStatus
-mem_alloc_contig(void **ppMemAddr, const Cpa32U sizeBytes, const Cpa32U alignment)
+static inline CpaStatus
+_mem_alloc_contig(void **ppMemAddr, const Cpa32U sizeBytes)
+{
+    void *pAlloc = NULL;
+
+    /* set to NULL even if it fails to avoid problems with deallocation */
+    *ppMemAddr = NULL;
+
+    pAlloc = kmalloc((sizeBytes + sizeof(void *)), GFP_KERNEL);
+    if (NULL == pAlloc)
+    {
+	return CPA_STATUS_RESOURCE;
+    }
+
+    *ppMemAddr = pAlloc + sizeof(void *);
+    *(ADDR_LEN *)(*ppMemAddr - sizeof(void *)) = (ADDR_LEN)pAlloc;
+
+    return CPA_STATUS_SUCCESS;
+
+}
+
+static inline CpaStatus
+_mem_alloc_contig_aligned(void **ppMemAddr, const Cpa32U sizeBytes, const Cpa32U alignment)
 {
     void *pAlloc = NULL;
     uint32_t align = 0;
 
-    pAlloc = kmalloc_node((sizeBytes + alignment + sizeof(void *)), GFP_KERNEL, 0);
+    /* set to NULL even if it fails to avoid problems with deallocation */
+    *ppMemAddr = NULL;
+
+    // pAlloc = kmalloc_node((sizeBytes + alignment + sizeof(void *)), GFP_KERNEL, 0);
+    pAlloc = kmalloc((sizeBytes + alignment + sizeof(void *)), GFP_KERNEL);
     if (NULL == pAlloc)
     {
 	return CPA_STATUS_RESOURCE;
@@ -56,6 +81,23 @@ mem_alloc_contig(void **ppMemAddr, const Cpa32U sizeBytes, const Cpa32U alignmen
     return CPA_STATUS_SUCCESS;
 }
 
+CpaStatus
+mem_alloc_contig(void **ppMemAddr, const Cpa32U sizeBytes, const Cpa32U alignment)
+{
+	CpaStatus status = CPA_STATUS_FAIL;
+	switch (alignment)
+	{
+		case 0:
+		case 1:
+			status = _mem_alloc_contig(ppMemAddr, sizeBytes);
+			break;
+		default:
+			status = _mem_alloc_contig_aligned(ppMemAddr, sizeBytes, alignment);
+			break;
+	}
+
+	return status;
+}
 
 void
 mem_free_contig(void **ppMemAddr)

@@ -28,17 +28,31 @@
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <linux/completion.h>
-#include <sys/zfs_context.h>
+// #include <sys/zfs_context.h>
 
 #include <cpa.h>
+
+#define QAT_DEBUG 0
 
 /*
 * INTEL: For optimal performance, data pointers should be 8-byte aligned. In some cases this is a
 * requirement, while in most other cases, it is a recommendation for performance.
 */
 
+/*
+For optimal performance, ensure the following:
+• All data buffers should be aligned on a 64-byte boundary.
+• Transfer sizes that are multiples of 64 bytes are optimal.
+• Small data transfers (less than 64 bytes) should be avoided. If a small data
+  transfer is needed, consider embedding this within a larger buffer so that the
+  transfer size is a multiple of 64 bytes. Offsets can then be used to identify the
+  region of interest within the larger buffer.
+• Each buffer entry within a Scatter-Gather-List (SGL) should be a multiple of
+  64bytes and should be aligned on a 64-byte boundary.
+*/
+
 #define	PHYS_CONTIG_ALLOC(pp_mem_addr, size_bytes)	\
-	mem_alloc_contig((void *)(pp_mem_addr), (size_bytes), 8)
+	mem_alloc_contig((void *)(pp_mem_addr), (size_bytes), 1)
 
 #define PHYS_CONTIG_ALLOC_ALIGNED(ppMemAddr, sizeBytes, alignment)	\
 	mem_alloc_contig((void *)(ppMemAddr), (sizeBytes), (alignment))
@@ -59,9 +73,12 @@ extern CpaStatus mem_alloc_virtual(void **ppMemAddr, const Cpa32U sizeBytes);
 extern void mem_free_virtual(void **ppMemAddr);
 
 #define ceil(n, d) (((n) < 0) ? (-((-(n))/(d))) : (n)/(d) + ((n)%(d) != 0))
+#define multipleOf64(n) (64 * ceil((n), 64))
 
 extern int zfs_qat_init_failure_threshold;
 extern int zfs_qat_disable;
+
+#define USEC_IN_SEC     1000000UL
 
 #endif // kernel/qat
 

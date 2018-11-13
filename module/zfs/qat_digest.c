@@ -35,6 +35,17 @@
 #include "qat_common.h"
 #include "qat_digest.h"
 
+
+/*
+ * Within the scope of this file file the kmem_cache_* definitions
+ * are removed to allow access to the real Linux slab allocator.
+ */
+#undef kmem_cache_destroy
+#undef kmem_cache_create
+#undef kmem_cache_alloc
+#undef kmem_cache_free
+
+
 /*
  * Timeout - no response from hardware after 0.5 - 3 seconds
  */
@@ -128,6 +139,7 @@ typedef struct qat_stats {
 } qat_stats_t;
 
 qat_stats_t qat_cy_stats = {
+
 	{ "init_failed",			KSTAT_DATA_UINT64 },
 
 	{ "sha2_256_requests",			KSTAT_DATA_UINT64 },
@@ -168,19 +180,26 @@ int zfs_qat_disable_sha2_256 = 0;
 int zfs_qat_disable_sha3_256 = 0;
 #endif
 
-static kstat_t *qat_ksp;
+static kstat_t *qat_ksp = NULL;
+static struct kmem_cache *opCache = NULL;
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t initialized = ATOMIC_INIT(0);
 static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };
 static atomic_t current_instance_number = ATOMIC_INIT(0);
 
+static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
+static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
+
 static spinlock_t instance_storage_lock;
 static spinlock_t next_instance_lock;
 
-static volatile uint64_t sha2_256TimeUs = 0;
+static spinlock_t throughput_sha2_256_lock;
+static volatile struct timespec sha2_256Time = {0};
+
 #if QAT_DIGEST_ENABLE_SHA3_256
-static volatile uint64_t sha3_256TimeUs = 0;
+static spinlock_t throughput_sha3_256_lock;
+static volatile struct timespec sha3_256Time = {0};
 #endif
 
 #define	QAT_STAT_INCR(stat, val) \
@@ -188,10 +207,8 @@ static volatile uint64_t sha3_256TimeUs = 0;
 #define	QAT_STAT_BUMP(stat) \
 	QAT_STAT_INCR(stat, 1);
 
-#define USEC_IN_SEC	1000000UL
-
 static inline int
-getNextInstance(Cpa16U num_inst) 
+getNextInstance(Cpa16U num_inst)
 {
     int inst = 0;
     unsigned long flags;
@@ -202,7 +219,6 @@ getNextInstance(Cpa16U num_inst)
 
     return (inst);
 }
-
 
 static inline boolean_t
 check_and_lock(Cpa16U i)
@@ -231,63 +247,134 @@ unlock_instance(Cpa16U i)
 }
 
 static inline void
-updateThroughputSha2_256(const uint64_t start, const uint64_t end) {
-    const uint64_t us = jiffies_to_usecs(end - start);
-    const uint64_t time = atomic_add_64_nv(&sha2_256TimeUs, us);
-    if (time > 0) {
+updateThroughputSha2_256(const uint64_t start, const uint64_t end)
+{
+    unsigned long flags;
+    struct timespec ts;
+    jiffies_to_timespec(end - start, &ts);
+
+    spin_lock_irqsave(&throughput_sha2_256_lock, flags);
+
+    sha2_256Time = timespec_add(sha2_256Time, ts);
+    if (sha2_256Time.tv_sec > 0) {
         const uint64_t processed = qat_cy_stats.sha2_256_total_success_bytes.value.ui64;
-	if (processed > 0) {
-    	    atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, USEC_IN_SEC * processed / time);
-    	}
+        atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, processed / sha2_256Time.tv_sec);
     }
+
+    spin_unlock_irqrestore(&throughput_sha2_256_lock, flags);
 }
 
 #if QAT_DIGEST_ENABLE_SHA3_256
 static inline void
-updateThroughputSha3_256(const uint64_t start, const uint64_t end) {
-    const uint64_t us = jiffies_to_usecs(end - start);
-    const uint64_t time = atomic_add_64_nv(&sha3_256TimeUs, us);
-    if (time > 0) {
-	const uint64_t processed = qat_cy_stats.sha3_256_total_success_bytes.value.ui64;
-	if (processed > 0) {
-    	    atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, USEC_IN_SEC * processed / time);
-    	}
+updateThroughputSha3_256(const uint64_t start, const uint64_t end)
+{
+
+    unsigned long flags;
+    struct timespec ts;
+    jiffies_to_timespec(end - start, &ts);
+
+    spin_lock_irqsave(&throughput_sha3_256_lock, flags);
+
+    sha3_256Time = timespec_add(sha3_256Time, ts);
+    if (sha3_256Time.tv_sec > 0) {
+        const uint64_t processed = qat_cy_stats.sha3_256_total_success_bytes.value.ui64;
+        atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, processed / sha3_256Time.tv_sec);
     }
+
+    spin_unlock_irqrestore(&throughput_sha3_256_lock, flags);
 }
 #endif
+
+static inline CpaStatus
+CREATE_OPDATA(CpaCySymDpOpData **ptr)
+{
+	CpaStatus status = CPA_STATUS_FAIL;
+
+	*ptr = NULL;
+
+	if (NULL != opCache)
+	{
+
+		void *result = kmem_cache_alloc(opCache, GFP_KERNEL);
+		if (NULL != result)
+		{
+			*ptr = (CpaCySymDpOpData*)result;
+			status = CPA_STATUS_SUCCESS;
+		}
+		else
+		{
+			status = CPA_STATUS_RESOURCE;
+		}
+	}
+
+	return status;
+}
+
+#define DESTROY_OPDATA(pOpData) _destroy_opdata(&(pOpData))
+static inline void
+_destroy_opdata(CpaCySymDpOpData **ptr)
+{
+	if (NULL != *ptr)
+	{
+		if (NULL != opCache)
+		{
+			kmem_cache_free(opCache, *ptr);
+		}
+		*ptr = NULL;
+	}
+}
+
+static void
+cacheConstructor(void *pOpData)
+{
+	memset(pOpData, 0, sizeof(CpaCySymDpOpData));
+}
 
 int
 qat_digest_init(void)
 {
-
 	Cpa16U numInstances = 0;
+
+	opCache = kmem_cache_create("CpaCySymDpOpData",
+				sizeof(CpaCySymDpOpData),
+				8, SLAB_HWCACHE_ALIGN|SLAB_CACHE_DMA,
+				cacheConstructor);
+	if (NULL == opCache)
+	{
+		goto err;
+	}
 
 	qat_ksp = kstat_create("zfs", 0, "qat-cy", "misc",
 	    KSTAT_TYPE_NAMED, sizeof (qat_cy_stats) / sizeof (kstat_named_t),
 	    KSTAT_FLAG_VIRTUAL);
-	if (qat_ksp != NULL) 
+
+	if (NULL == qat_ksp)
 	{
-		qat_ksp->ks_data = &qat_cy_stats;
-		kstat_install(qat_ksp);
+		goto err;
+	}
 
-		spin_lock_init(&next_instance_lock);
-		spin_lock_init(&instance_storage_lock);
+	qat_ksp->ks_data = &qat_cy_stats;
+	kstat_install(qat_ksp);
 
-		atomic_inc(&initialized);
+	spin_lock_init(&next_instance_lock);
+	spin_lock_init(&instance_storage_lock);
 
-	    if (CPA_STATUS_SUCCESS == cpaCyGetNumInstances(&numInstances) && numInstances > 0)
-	    {
+	atomic_inc(&initialized);
+
+	if (CPA_STATUS_SUCCESS == cpaCyGetNumInstances(&numInstances) && numInstances > 0)
+	{
 		printk(KERN_INFO LOG_PREFIX "started with %ld CY instances\n", min((long)numInstances,(long)MAX_INSTANCES));
-	    }
-	    else
-	    {
-		printk(KERN_INFO LOG_PREFIX "initialized\n");
-	    }
 	}
 	else
 	{
-	    printk(KERN_ALERT LOG_PREFIX "initialization failed\n");
+		printk(KERN_INFO LOG_PREFIX "initialized\n");
 	}
+
+	return 0;
+
+    err:
+
+	printk(KERN_ALERT LOG_PREFIX "initialization failed\n");
 
 	return 0;
 }
@@ -295,12 +382,18 @@ qat_digest_init(void)
 void
 qat_digest_fini(void)
 {
-	if (qat_ksp != NULL)
+	if (NULL != qat_ksp)
 	{
 		atomic_dec(&initialized);
 
 		kstat_delete(qat_ksp);
 		qat_ksp = NULL;
+	}
+
+	if (NULL != opCache)
+	{
+		kmem_cache_destroy(opCache);
+		opCache = NULL;
 	}
 }
 
@@ -328,12 +421,11 @@ qat_digest_use_accel(const qat_digest_type_t dir, const size_t s_len)
 
 	default:
 	    // impossible
-	    break;;
+	    break;
 	}
     }
 
     return (ret);
-
 }
 
 static void
@@ -393,16 +485,13 @@ qat_cy_callback_polled(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean v
 static inline uint32_t
 getTimeoutMs(const int dataSize, const int maxSize)
 {
-
     uint32_t timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
     return timeout;
-
 }
 
 static CpaStatus
 isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
 {
-
     CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
 
@@ -430,7 +519,6 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
 static CpaStatus
 getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 {
-
     CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
 
@@ -439,11 +527,11 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
     }
 
-    if (CPA_STATUS_SUCCESS == status) 
+    if (CPA_STATUS_SUCCESS == status)
     {
         // get name of instance
 	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-	if (CPA_STATUS_SUCCESS == status) 
+	if (CPA_STATUS_SUCCESS == status)
 	{
 	    strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
 	}
@@ -457,7 +545,6 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 static CpaStatus
 waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs)
 {
-
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa8U *instanceName = NULL;
 
@@ -505,11 +592,11 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *
 	struct completion *complete = (struct completion*)pOpData->pCallbackTag;
 
     	/* we now wait until the completion of the operation using interrupts */
-    	if (0 == wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))) 
+    	if (0 == wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs)))
     	{
 
 	    CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
-	    if (CPA_STATUS_SUCCESS == memStatus) 
+	    if (CPA_STATUS_SUCCESS == memStatus)
 	    {
 		memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
 	    }
@@ -548,11 +635,30 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
     CpaInstanceHandle *handles = NULL;
 
     status = cpaCyGetNumInstances(&num_inst);
-    if (status != CPA_STATUS_SUCCESS || num_inst == 0) 
+    if (status != CPA_STATUS_SUCCESS)
     {
-            printk(KERN_ALERT LOG_PREFIX "failed counting instances, num_inst=%d, num_failed=%d (status=%d)\n",
-                    num_inst, atomic_read(&numInitFailed), status);
+        // show message once in a minute
+        if (jiffies_to_msecs(jiffies - atomic_long_read(&getInstanceFailed)) > 60L * 1000L)
+        {
+                printk(KERN_ALERT LOG_PREFIX "failed counting instances, num_failed=%d (status=%d)\n",
+                    atomic_read(&numInitFailed), status);
+                atomic_long_set(&getInstanceFailed, jiffies);
+        }
+        goto done;
+    }
+    else
+    {
+        // return success but no instances configured
+        if (num_inst == 0)
+        {
+            // show message once in a minute
+            if (jiffies_to_msecs(jiffies - atomic_long_read(&getInstanceMessageShown)) > 60L * 1000L)
+            {
+                printk(KERN_ALERT LOG_PREFIX "no instances found, please configure NumberCyInstances in [KERNEL_QAT] section\n");
+                atomic_long_set(&getInstanceMessageShown, jiffies);
+            }
             goto done;
+        }
     }
 
     if (num_inst > MAX_INSTANCES)
@@ -585,11 +691,14 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
 	}
     }
 
-    if (!instanceFound) {
+    if (!instanceFound)
+    {
 	status = CPA_STATUS_RESOURCE;
 	printk(KERN_WARNING LOG_PREFIX "failed to find free CY instance ouf of %d, consider to increase NumberCyInstances in [KERNEL_QAT] section\n", num_inst);
 	QAT_STAT_BUMP(err_no_instance_available);
-    } else {
+    }
+    else
+    {
         *instance = handles[inst];
         *instanceNum = inst;
     }
@@ -599,10 +708,9 @@ done:
     VIRT_FREE(handles);
 
     return status;
-
 }
 
-static inline void 
+static inline void
 symSessionWaitForInflightReq(CpaCySymSessionCtx pSessionCtx)
 {
 
@@ -612,9 +720,9 @@ symSessionWaitForInflightReq(CpaCySymSessionCtx pSessionCtx)
     do
     {
         cpaCySymSessionInUse(pSessionCtx, &sessionInUse);
-        if (CPA_TRUE == sessionInUse) {
-    	    yield();
-        }
+        // if (CPA_TRUE == sessionInUse) {
+    	//    yield();
+        // }
     } while (sessionInUse);
 #endif
     return;
@@ -644,7 +752,6 @@ getDigestLength(const CpaCySymHashAlgorithm algo, Cpa32U *length)
     }
 
     return status;
-
 }
 
 static inline void
@@ -690,10 +797,9 @@ registerFailedRequest(const CpaCySymHashAlgorithm algo) {
     }
 }
 
-
 static void
-registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, const int dest_len) {
-
+registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, const int dest_len) 
+{
     switch (algo)
     {
 	case CPA_CY_SYM_HASH_SHA256:
@@ -724,7 +830,7 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 
     CpaStatus status = CPA_STATUS_SUCCESS;
     CpaCySymDpOpData *pOpData = NULL;
-    Cpa32U digestLength = 0; 
+    Cpa32U digestLength = 0;
     Cpa32U bufferSize = src_len;
     Cpa8U *pSrcBuffer = NULL;
 
@@ -757,14 +863,14 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
          * 8-byte aligned, contiguous, resident in DMA-accessible
          * memory.
          */
-        status =
-            PHYS_CONTIG_ALLOC_ALIGNED(&pOpData, sizeof(CpaCySymDpOpData), 8);
+        // PHYS_CONTIG_ALLOC_ALIGNED(&pOpData, sizeof(CpaCySymDpOpData), 8);
+        status = CREATE_OPDATA(&pOpData);
     }
 
     if (CPA_STATUS_SUCCESS == status)
     {
 
-	memset(pOpData, 0, sizeof(CpaCySymDpOpData));
+	// memset(pOpData, 0, sizeof(CpaCySymDpOpData));
 
         /** Populate the structure containing the operational data that is
          * needed to run the algorithm
@@ -827,7 +933,9 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
     }
 
     PHYS_CONTIG_FREE(pSrcBuffer);
-    PHYS_CONTIG_FREE(pOpData);
+    // PHYS_CONTIG_FREE(pOpData);
+    DESTROY_OPDATA(pOpData);
+
     VIRT_FREE(pComplete);
 
     return (ret);
@@ -1013,7 +1121,6 @@ failed:
     }
 
     return (ret);
-
 }
 
 /*************************************************************************
