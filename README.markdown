@@ -10,10 +10,12 @@ News on this release:
 - support of GZIP compression level (gzip-1 to gzip-9)
 - statistics zfs/qat changed to zfs/qat-dc
 - extended statistics includes throughput and counts of errors and operation status
-- implementation is intesively using kernel contiguous memory for flat source and destination buffers, please configure your usdm_drv correspondingly (see `modinfo usdm_drv`)
+- implementation is intesively using kernel contiguous memory for flat source and destination buffers
 - qat compression, decompression and checksum can be disabled independently (for by example benchmarking, comparing with sw-implementation or development/debugging purposes)
 - access to QAT can be disabled completely with `zfs_qat_disable` parameter
-- QAT support disables itself automatically (independent for DC and CY) if can't initialize corresponding DC or CY instances after configurable number of requests (default 100). The threshold is configurable by zfs module parameter.
+- QAT support disables itself automatically (independent for DC and CY) if can't initialize corresponding DC or CY instances after configurable number of requests (default 100). The threshold is configurable by zfs module parameter
+
+To avoid initialization failures at boot time caused by QAT starting later then ZFS module is loaded I can suggest to put `options zfs zfs_qat_disable=1` into `/etc/modprobe.d/zfs.conf`, then create a service which starts after QAT and enables QAT in ZFS with `echo 0 > /sys/modules/zfs/parameters/zfs_qat_disable`
 
 # ZFS module parameters
 ```
