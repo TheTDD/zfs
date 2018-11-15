@@ -80,6 +80,8 @@ extern int zfs_qat_disable;
 
 #define USEC_IN_SEC     1000000UL
 
+#define DESTROY_CACHE(cache) if (NULL != cache) { kmem_cache_destroy(cache); cache = NULL; }
+
 #endif // kernel/qat
 
 #endif // defined
