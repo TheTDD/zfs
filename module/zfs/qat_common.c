@@ -24,10 +24,14 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
-// #include <linux/completion.h>
+#include <linux/gfp.h>
+#include <linux/mm.h>
+#include <linux/highmem.h>
 #include <sys/zfs_context.h>
 
 #include <cpa.h>
+
+#include "qat_common.h"
 
 #ifdef __x86_64__
 #define ADDR_LEN uint64_t
@@ -132,6 +136,84 @@ mem_free_virtual(void **ppMemAddr)
 	vfree(*ppMemAddr);
 	*ppMemAddr = NULL;
     }
+}
+
+static inline int
+find_order(uint16_t bytes)
+{
+
+        int i;
+        int result = -1;
+
+        for (i=0; i<MAX_ORDER; i++)
+        {
+
+                if (bytes <= PAGE_SIZE * (1 << i))
+                {
+                        result = i;
+                        break;
+                }
+        }
+
+        return result;
+
+}
+
+CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
+{
+	CpaStatus status = CPA_STATUS_FAIL;
+	struct page *page = NULL;
+	void *memory = NULL;
+	int order = find_order(size);
+
+	// clean structure to avoid issues by deallocations
+	memset(addr, 0 , sizeof(qat_highmem_t));
+
+	if (order >= 0)
+	{
+		page = alloc_pages(GFP_HIGHUSER, order);
+		if (page == NULL)
+		{
+		    printk(KERN_ALERT "page allocation for %ld bytes failed\n", (long)PAGE_SIZE * (1 << order));
+		    status = CPA_STATUS_RESOURCE;
+		    goto out;
+		}
+
+		// TODO: kmap_nonblock doesn't exist
+		memory = kmap(page);
+		if (memory == NULL)
+		{
+		    __free_pages(page, order);
+		    printk(KERN_ALERT "page mapping for %ld bytes failed\n", (long)PAGE_SIZE * (1 << order));
+		    status = CPA_STATUS_RESOURCE;
+		    goto out;
+		}
+
+		addr->page = page;
+		addr->ptr = memory;
+		addr->order = order;
+		status = CPA_STATUS_SUCCESS;
+	}
+
+out:
+
+	return status;
+
+}
+
+void highmem_free(qat_highmem_t* addr)
+{
+	if (addr->ptr != NULL && addr->page != NULL)
+	{
+		kunmap(addr->page);
+	}
+
+	if (addr->page != NULL)
+	{
+		__free_pages(addr->page, addr->order);
+	}
+
+	memset(addr, 0, sizeof(qat_highmem_t));
 }
 
 int zfs_qat_init_failure_threshold = 100;

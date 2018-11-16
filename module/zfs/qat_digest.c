@@ -25,6 +25,7 @@
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <linux/completion.h>
+#include <linux/rwlock.h>
 #include <sys/zfs_context.h>
 
 #include <cpa.h>
@@ -192,7 +193,7 @@ static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
 
 static spinlock_t instance_storage_lock;
 static spinlock_t next_instance_lock;
-static spinlock_t session_cache_lock;
+static rwlock_t session_cache_lock;
 
 static spinlock_t throughput_sha2_256_lock;
 static volatile struct timespec sha2_256Time = {0};
@@ -291,14 +292,21 @@ getReadySessionCache(Cpa16U size)
     CpaStatus status = CPA_STATUS_FAIL;
     unsigned long flags;
 
-    spin_lock_irqsave(&session_cache_lock, flags);
+    /* lock for reading and check */
+    read_lock_irqsave(&session_cache_lock, flags);
 
     if (sessionCache != NULL)
     {
         status = CPA_STATUS_SUCCESS;
     }
-    else
+
+    read_unlock_irqrestore(&session_cache_lock, flags);
+
+    if (CPA_STATUS_SUCCESS != status)
     {
+        /* lock for writing and create, happens only once */
+	write_lock_irqsave(&session_cache_lock, flags);
+
         sessionCache = kmem_cache_create("CpaCySessionBuffer",
                                 size, 0, 0, NULL);
         if (NULL != sessionCache)
@@ -310,9 +318,9 @@ getReadySessionCache(Cpa16U size)
                 printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for sessions (%d)\n", size);
                 status = CPA_STATUS_RESOURCE;
         }
-    }
 
-    spin_unlock_irqrestore(&session_cache_lock, flags);
+	write_unlock_irqrestore(&session_cache_lock, flags);
+    }
 
     return status;
 }
@@ -412,7 +420,8 @@ qat_digest_init(void)
 				cacheConstructor);
 	if (NULL == opCache)
 	{
-		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Op Data (%ld)\n", sizeof(CpaCySymDpOpData));
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Op Data (%ld)\n", 
+		       sizeof(CpaCySymDpOpData));
 		goto err;
 	}
 
@@ -431,7 +440,7 @@ qat_digest_init(void)
 
 	spin_lock_init(&next_instance_lock);
 	spin_lock_init(&instance_storage_lock);
-	spin_lock_init(&session_cache_lock);
+	rwlock_init(&session_cache_lock);
 
 	atomic_inc(&initialized);
 
@@ -471,9 +480,9 @@ qat_digest_fini(void)
 	DESTROY_CACHE(opCache);
 
 	/* initialized dynamically */
-	spin_lock_irqsave(&session_cache_lock, flags);
+	write_lock_irqsave(&session_cache_lock, flags);
 	DESTROY_CACHE(sessionCache);
-	spin_unlock_irqrestore(&session_cache_lock, flags);
+	write_unlock_irqrestore(&session_cache_lock, flags);
 }
 
 boolean_t

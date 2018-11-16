@@ -34,6 +34,20 @@
 
 #define QAT_DEBUG 0
 
+
+typedef struct qat_highmem
+{
+	struct page *page;
+	uint8_t order;
+	void *ptr;
+} qat_highmem_t;
+
+#define HIGHMEM_CONTIG_ALLOC(ptr, size) highmem_alloc(ptr, size)
+#define HIGHMEM_CONTIG_FREE(ptr) highmem_free(&(ptr))
+
+CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size);
+void highmem_free(qat_highmem_t* addr);
+
 /*
 * INTEL: For optimal performance, data pointers should be 8-byte aligned. In some cases this is a
 * requirement, while in most other cases, it is a recommendation for performance.
