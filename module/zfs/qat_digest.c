@@ -495,6 +495,11 @@ qat_digest_init(void)
 	qat_ksp->ks_data = &qat_cy_stats;
 	kstat_install(qat_ksp);
 
+	spin_lock_init(&throughput_sha2_256_lock);
+#if QAT_DIGEST_ENABLE_SHA3_256
+	spin_lock_init(&throughput_sha3_256_lock);
+#endif
+
 	spin_lock_init(&next_instance_lock);
 	spin_lock_init(&instance_storage_lock);
 	rwlock_init(&session_cache_lock);
