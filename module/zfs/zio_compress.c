@@ -118,9 +118,19 @@ zio_compress_data(enum zio_compress c, abd_t *src, void *dst, size_t s_len)
 	if (c == ZIO_COMPRESS_EMPTY)
 		return (s_len);
 
-	/* Compress at least 12.5% */
+#if defined(_KERNEL) && defined(HAVE_QAT)
+	if (ci->ci_compress == gzip_compress) {
+	    /* Allocated buffer same size, allow less compress ratio 3% */
+	    d_len = s_len - (s_len >> 5);
+	} else {
+    	    /* Compress at least 12.5% */
+	    d_len = s_len - (s_len >> 3);
+	}
+#else
+    	/* Compress at least 12.5% */
 	d_len = s_len - (s_len >> 3);
-
+#endif	
+	
 	/* No compression algorithms can read from ABDs directly */
 	tmp = abd_borrow_buf_copy(src, s_len);
 	c_len = ci->ci_compress(tmp, dst, s_len, d_len, ci->ci_level);
