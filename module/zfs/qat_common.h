@@ -34,7 +34,6 @@
 
 #define QAT_DEBUG 0
 
-
 typedef struct qat_highmem
 {
 	struct page *page;
@@ -95,6 +94,9 @@ extern int zfs_qat_disable;
 #define USEC_IN_SEC     1000000UL
 
 #define DESTROY_CACHE(cache) if (NULL != cache) { kmem_cache_destroy(cache); cache = NULL; }
+
+#define DEFAULT_ALIGN_CACHE 	8
+#define DEFAULT_ALIGN_ALLOC	1
 
 #endif // kernel/qat
 

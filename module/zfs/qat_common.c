@@ -141,13 +141,11 @@ mem_free_virtual(void **ppMemAddr)
 static inline int
 find_order(uint16_t bytes)
 {
-
         int i;
         int result = -1;
 
         for (i=0; i<MAX_ORDER; i++)
         {
-
                 if (bytes <= PAGE_SIZE * (1 << i))
                 {
                         result = i;
@@ -156,7 +154,6 @@ find_order(uint16_t bytes)
         }
 
         return result;
-
 }
 
 CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)

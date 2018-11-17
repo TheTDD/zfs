@@ -148,6 +148,7 @@ typedef struct qat_stats {
 	   qat config file, [KERNEL_QAT] section
 	 */
 	kstat_named_t err_no_instance_available;
+	kstat_named_t err_out_of_mem;
 	/* number of times engine failed to perform the operation in time */
 	kstat_named_t err_timeout;
 	/* number of times engine failed to generate ZLIB header */
@@ -193,6 +194,7 @@ qat_stats_t qat_dc_stats = {
 		{ "decomp_throughput_bps",		KSTAT_DATA_UINT64 },
 
 		{ "err_no_instance_available",          KSTAT_DATA_UINT64 },
+		{ "err_out_of_mem",			KSTAT_DATA_UINT64 },
 		{ "err_timeout",                        KSTAT_DATA_UINT64 },
 		{ "err_gen_header",                     KSTAT_DATA_UINT64 },
 		{ "err_gen_footer",                     KSTAT_DATA_UINT64 },
@@ -226,6 +228,7 @@ static kstat_t *qat_ksp = NULL;
 static struct kmem_cache *opCache = NULL;
 static struct kmem_cache *zlibCache = NULL;
 static struct kmem_cache *sessionCache = NULL;
+static struct kmem_cache *bufferCache = NULL;
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t initialized = ATOMIC_INIT(0);
@@ -324,6 +327,45 @@ updateThroughputDecomp(const uint64_t start, const uint64_t end)
 }
 
 static inline CpaStatus
+CREATE_BUFFER(Cpa8U **ptr)
+{
+	CpaStatus status = CPA_STATUS_FAIL;
+
+	/* set to NULL even if it fails to avoid dealocation issues later */
+	*ptr = NULL;
+
+	if (NULL != bufferCache)
+	{
+		void *result = kmem_cache_alloc(bufferCache, GFP_KERNEL);
+		if (NULL != result)
+		{
+			*ptr = (Cpa8U*)result;
+			status = CPA_STATUS_SUCCESS;
+		}
+		else
+		{
+			status = CPA_STATUS_RESOURCE;
+		}
+	}
+
+	return status;
+}
+
+#define DESTROY_BUFFER(pBuffer) _destroy_buffer(&(pBuffer))
+static inline void
+_destroy_buffer(Cpa8U **ptr)
+{
+	if (NULL != *ptr)
+	{
+		if (NULL != bufferCache)
+		{
+			kmem_cache_free(bufferCache, *ptr);
+		}
+		*ptr = NULL;
+	}
+}
+
+static inline CpaStatus
 CREATE_OPDATA(CpaDcDpOpData **ptr)
 {
 	CpaStatus status = CPA_STATUS_FAIL;
@@ -401,79 +443,6 @@ _destroy_zlib_buf(Cpa8U **ptr)
 	}
 }
 
-#if 0
-static inline CpaStatus
-CREATE_METADATA(void **ptr)
-{
-	CpaStatus status = CPA_STATUS_FAIL;
-
-	/* set to NULL even if it fails to avoid dealocation issues later */
-	*ptr = NULL;
-
-	if (NULL != metadataCache)
-	{
-		void *result = kmem_cache_alloc(metadataCache, GFP_KERNEL);
-		if (NULL != result)
-		{
-			*ptr = result;
-			status = CPA_STATUS_SUCCESS;
-		}
-		else
-		{
-			status = CPA_STATUS_RESOURCE;
-		}
-	}
-
-	return status;
-}
-
-#define DESTROY_METADATA(pBuf) _destroy_metadata(&(pBuf))
-static inline void
-_destroy_metadata(void **ptr)
-{
-	if (NULL != *ptr)
-	{
-		if (NULL != metadataCache)
-		{
-			kmem_cache_free(metadataCache, *ptr);
-		}
-		*ptr = NULL;
-	}
-}
-
-static inline CpaStatus
-getReadyMetadataCache(Cpa16U size)
-{
-	CpaStatus status = CPA_STATUS_FAIL;
-	unsigned long flags;
-
-	spin_lock_irqsave(&metadata_buffer_lock, flags);
-
-	if (metadataCache != NULL)
-	{
-		status = CPA_STATUS_SUCCESS;
-	}
-	else
-	{
-		metadataCache = kmem_cache_create("CpaDcMetadataBuffer",
-				size, 0, 0, NULL);
-		if (NULL != metadataCache)
-		{
-			status = CPA_STATUS_SUCCESS;
-		}
-		else
-		{
-			printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for metadata (%d)\n", size);
-			status = CPA_STATUS_RESOURCE;
-		}
-	}
-
-	spin_unlock_irqrestore(&metadata_buffer_lock, flags);
-
-	return status;
-}
-#endif
-
 static inline CpaStatus
 getReadySessionCache(Cpa16U size)
 {
@@ -496,7 +465,8 @@ getReadySessionCache(Cpa16U size)
 		write_lock_irqsave(&session_cache_lock, flags);
 
 		sessionCache = kmem_cache_create("CpaDcSessionBuffer",
-				size, 0, 0, NULL);
+			size, DEFAULT_ALIGN_CACHE,
+			SLAB_TEMPORARY, NULL);
 		if (NULL != sessionCache)
 		{
 			status = CPA_STATUS_SUCCESS;
@@ -565,13 +535,15 @@ int
 qat_compress_init(void)
 {
 	Cpa16U numInstances = 0;
+    
+    	/* max size of output buffer on compression is the max size of buffers used */
+    	int bufferSize = ceil( 9 * QAT_MAX_BUF_SIZE, 8 ) + 55;
 
 	/* use caches to avoid kernel memory fragmentation */
-
 	opCache = kmem_cache_create("CpaDcDpOpData",
-			sizeof(CpaDcDpOpData),
-			8, SLAB_HWCACHE_ALIGN|SLAB_CACHE_DMA,
-			cacheConstructor);
+		sizeof(CpaDcDpOpData),
+		8, SLAB_TEMPORARY|SLAB_CACHE_DMA,
+		cacheConstructor);
 	if (NULL == opCache)
 	{
 		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Op Data (%ld)\n", sizeof(CpaDcDpOpData));
@@ -579,11 +551,20 @@ qat_compress_init(void)
 	}
 
 	zlibCache = kmem_cache_create("CpaDcZlibBuffer",
-			max((long)ZLIB_HEAD_SZ,(long)ZLIB_FOOT_SZ),
-			0, 0, NULL);
+		max((long)ZLIB_HEAD_SZ,(long)ZLIB_FOOT_SZ),
+		DEFAULT_ALIGN_CACHE, SLAB_TEMPORARY, NULL);
 	if (NULL == zlibCache)
 	{
-		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Zlib headers (%d)\n", ZLIB_HEAD_SZ);
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Zlib structures (%d)\n", ZLIB_HEAD_SZ);
+		goto err;
+	}
+
+	bufferCache = kmem_cache_create("CpaDcBuffer",
+		bufferSize,
+		DEFAULT_ALIGN_CACHE, SLAB_TEMPORARY, NULL);
+	if (NULL == bufferCache)
+	{
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for input/output buffers (%d)\n", bufferSize);
 		goto err;
 	}
 
@@ -644,6 +625,7 @@ qat_compress_fini(void)
 	// caches are created in init
 	DESTROY_CACHE(opCache);
 	DESTROY_CACHE(zlibCache);
+	DESTROY_CACHE(bufferCache);
 
 	// caches are created dynamically
 	write_lock_irqsave(&session_cache_lock, flags);
@@ -896,12 +878,12 @@ requiresPhysicallyContiguousMemory(const CpaInstanceHandle dcInstHandle, boolean
 
 	if (CPA_STATUS_SUCCESS == status)
 	{
-		// get type of instance, polled (1) or interrupt (0)
 		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-		if (CPA_STATUS_SUCCESS == status)
-		{
-			*contig = instanceInfo->requiresPhysicallyContiguousMemory;
-		}
+	}
+
+	if (CPA_STATUS_SUCCESS == status)
+	{
+		*contig = instanceInfo->requiresPhysicallyContiguousMemory;
 	}
 
 	VIRT_FREE(instanceInfo);
@@ -925,10 +907,11 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
 	{
 		// get type of instance, polled (1) or interrupt (0)
 		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-		if (CPA_STATUS_SUCCESS == status)
-		{
-			*polled = instanceInfo->isPolled;
-		}
+	}
+
+	if (CPA_STATUS_SUCCESS == status)
+	{
+		*polled = instanceInfo->isPolled;
 	}
 
 	VIRT_FREE(instanceInfo);
@@ -952,10 +935,11 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 	{
 		// get name of instance
 		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-		if (CPA_STATUS_SUCCESS == status)
-		{
-			strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
-		}
+	}
+
+	if (CPA_STATUS_SUCCESS == status)
+	{
+		strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
 	}
 
 	VIRT_FREE(instanceInfo);
@@ -1183,8 +1167,15 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	/* allocate source buffer */
 	if (CPA_STATUS_SUCCESS == status)
 	{
-		status = PHYS_CONTIG_ALLOC(&srcBuf.pData, src_len);
+		// status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len, DEFAULT_ALIGN_ALLOC);
+	    	status = CREATE_BUFFER(&srcBuf.pData);
 		srcBuf.dataLenInBytes = src_len;
+		if (CPA_STATUS_SUCCESS != status)
+        	{
+                	printk(KERN_WARNING LOG_PREFIX "compression failed to allocate %d bytes for input buffer\n",
+                        	src_len);
+			QAT_STAT_BUMP(err_out_of_mem);
+        	}
 	}
 
 	/* allocate destination buffer */
@@ -1192,8 +1183,15 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	{
 		memcpy(srcBuf.pData, src, src_len);
 
-		status = PHYS_CONTIG_ALLOC(&destBuf.pData, bufferSize);
+		// status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, DEFAULT_ALIGN_ALLOC);
+	    	status = CREATE_BUFFER(&destBuf.pData);
 		destBuf.dataLenInBytes = bufferSize;
+                if (CPA_STATUS_SUCCESS != status)
+                {
+                        printk(KERN_WARNING LOG_PREFIX "compression failed to allocate %d bytes for output buffer\n",
+                        	bufferSize);
+			QAT_STAT_BUMP(err_out_of_mem);
+                }
 	}
 
 	/* allocate header buffer */
@@ -1219,19 +1217,23 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		{
 			QAT_STAT_BUMP(err_gen_header);
 			printk(KERN_CRIT LOG_PREFIX "failed to generate header into buffer of size %d (status=%d)\n",
-					headerBuf.dataLenInBytes, status);
+				headerBuf.dataLenInBytes, status);
 		}
 	}
 
 	/* allocate pOpData */
 	if (CPA_STATUS_SUCCESS == status)
 	{
-
 		/* Allocate memory for operational data. Note this needs to be
 		 * 8-byte aligned, contiguous, resident in DMA-accessible
 		 * memory.
 		 */
 		status = CREATE_OPDATA(&pOpData);
+		if (CPA_STATUS_SUCCESS != status)
+                {
+                        printk(KERN_WARNING LOG_PREFIX "compression failed to allocate opdata\n");
+                        QAT_STAT_BUMP(err_out_of_mem);
+                }
 	}
 
 	// submit operation
@@ -1405,8 +1407,10 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
 	DESTROY_OPDATA(pOpData);
 
-	PHYS_CONTIG_FREE(srcBuf.pData);
-	PHYS_CONTIG_FREE(destBuf.pData);
+	// PHYS_CONTIG_FREE(srcBuf.pData);
+	// PHYS_CONTIG_FREE(destBuf.pData);
+	DESTROY_BUFFER(srcBuf.pData);
+	DESTROY_BUFFER(destBuf.pData);
 
 	if (contig)
 	{
@@ -1461,8 +1465,15 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	/* allocate source buffer */
 	if (CPA_STATUS_SUCCESS == status)
 	{
-		status = PHYS_CONTIG_ALLOC(&srcBuf.pData, src_len - ZLIB_HEAD_SZ);
+		// status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len - ZLIB_HEAD_SZ, DEFAULT_ALIGN_ALLOC);
+		status = CREATE_BUFFER(&srcBuf.pData);
 		srcBuf.dataLenInBytes = src_len - ZLIB_HEAD_SZ;
+                if (CPA_STATUS_SUCCESS != status)
+                {
+                        printk(KERN_WARNING LOG_PREFIX "decompression failed to allocate %d bytes for input buffer\n",
+                        	src_len - ZLIB_HEAD_SZ);
+			QAT_STAT_BUMP(err_out_of_mem);
+                }
 	}
 
 	/* allocate destination buffer */
@@ -1470,8 +1481,15 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	{
 		memcpy(srcBuf.pData, &src[ZLIB_HEAD_SZ], src_len - ZLIB_HEAD_SZ);
 
-		status = PHYS_CONTIG_ALLOC(&destBuf.pData, bufferSize);
+		// status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, DEFAULT_ALIGN_ALLOC);
+	    	status = CREATE_BUFFER(&destBuf.pData);
 		destBuf.dataLenInBytes = bufferSize;
+                if (CPA_STATUS_SUCCESS != status)
+                {
+                        printk(KERN_WARNING LOG_PREFIX "decompression failed to allocate %d bytes for output buffer\n",
+                        	bufferSize);
+			QAT_STAT_BUMP(err_out_of_mem);
+                }
 	}
 
 	/* allocate pOpData */
@@ -1483,6 +1501,11 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 		 * memory.
 		 */
 		status = CREATE_OPDATA(&pOpData);
+		if (CPA_STATUS_SUCCESS != status)
+		{
+			printk(KERN_WARNING LOG_PREFIX "decompression failed to allocate opdata\n");
+			QAT_STAT_BUMP(err_out_of_mem);
+		}
 	}
 
 	// submit operation
@@ -1589,8 +1612,10 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	 */
 	DESTROY_OPDATA(pOpData);
 
-	PHYS_CONTIG_FREE(srcBuf.pData);
-	PHYS_CONTIG_FREE(destBuf.pData);
+	// PHYS_CONTIG_FREE(srcBuf.pData);
+	// PHYS_CONTIG_FREE(destBuf.pData);
+	DESTROY_BUFFER(srcBuf.pData);
+	DESTROY_BUFFER(destBuf.pData);
 
 	VIRT_FREE(pComplete);
 

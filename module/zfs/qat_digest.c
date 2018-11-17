@@ -123,6 +123,7 @@ typedef struct qat_stats {
 #endif
 	/* number of times unlocked instance was not available */
 	kstat_named_t err_no_instance_available;
+	kstat_named_t err_out_of_mem;
 
 	kstat_named_t err_timeout;
 
@@ -159,6 +160,7 @@ qat_stats_t qat_cy_stats = {
 
 #endif
 	{ "err_no_instance_available",		KSTAT_DATA_UINT64 },
+	{ "err_out_of_mem",			KSTAT_DATA_UINT64 },
 	{ "err_timeout",			KSTAT_DATA_UINT64 },
 
 	// from operations
@@ -182,6 +184,7 @@ int zfs_qat_disable_sha3_256 = 0;
 static kstat_t *qat_ksp = NULL;
 static struct kmem_cache *opCache = NULL;
 static struct kmem_cache *sessionCache = NULL;
+static struct kmem_cache *bufferCache = NULL;
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t initialized = ATOMIC_INIT(0);
@@ -269,7 +272,6 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 static inline void
 updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 {
-
     unsigned long flags;
     struct timespec ts;
     jiffies_to_timespec(end - start, &ts);
@@ -308,7 +310,8 @@ getReadySessionCache(Cpa16U size)
 	write_lock_irqsave(&session_cache_lock, flags);
 
         sessionCache = kmem_cache_create("CpaCySessionBuffer",
-                                size, 0, 0, NULL);
+		size, DEFAULT_ALIGN_CACHE,
+		SLAB_TEMPORARY, NULL);
         if (NULL != sessionCache)
         {
                 status = CPA_STATUS_SUCCESS;
@@ -403,6 +406,50 @@ _destroy_opdata(CpaCySymDpOpData **ptr)
 	}
 }
 
+static inline CpaStatus
+CREATE_BUFFER(Cpa8U **ptr)
+{
+	CpaStatus status = CPA_STATUS_FAIL;
+
+	*ptr = NULL;
+
+	if (NULL != bufferCache)
+	{
+		void *result = kmem_cache_alloc(bufferCache, GFP_KERNEL);
+		if (NULL != result)
+		{
+			*ptr = (Cpa8U*)result;
+			status = CPA_STATUS_SUCCESS;
+		}
+		else
+		{
+			status = CPA_STATUS_RESOURCE;
+		}
+	}
+
+	return status;
+}
+
+#define DESTROY_BUFFER(pBuffer) _destroy_buffer(&(pBuffer))
+static inline void
+_destroy_buffer(Cpa8U **ptr)
+{
+	if (NULL != *ptr)
+	{
+		if (NULL != bufferCache)
+		{
+			kmem_cache_free(bufferCache, *ptr);
+		}
+		*ptr = NULL;
+	}
+}
+
+#if QAT_DIGEST_ENABLE_SHA3_256
+#define MAX_DIGEST_LENGTH max((long)SHA2_256_DIGEST_LENGTH,(long)SHA3_256_DIGEST_LENGTH);
+#else
+#define MAX_DIGEST_LENGTH SHA2_256_DIGEST_LENGTH
+#endif
+
 static void
 cacheConstructor(void *pOpData)
 {
@@ -415,13 +462,23 @@ qat_digest_init(void)
 	Cpa16U numInstances = 0;
 
 	opCache = kmem_cache_create("CpaCySymDpOpData",
-				sizeof(CpaCySymDpOpData),
-				8, SLAB_HWCACHE_ALIGN|SLAB_CACHE_DMA,
-				cacheConstructor);
+		sizeof(CpaCySymDpOpData),
+		8, SLAB_TEMPORARY|SLAB_CACHE_DMA,
+		cacheConstructor);
 	if (NULL == opCache)
 	{
 		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Op Data (%ld)\n", 
 		       sizeof(CpaCySymDpOpData));
+		goto err;
+	}
+
+	bufferCache = kmem_cache_create("CpaCyBuffer",
+		QAT_MAX_BUF_SIZE + MAX_DIGEST_LENGTH,
+		DEFAULT_ALIGN_CACHE, SLAB_TEMPORARY, NULL);
+	if (NULL == bufferCache)
+	{
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for input (%d)\n", 
+		       QAT_MAX_BUF_SIZE + MAX_DIGEST_LENGTH);
 		goto err;
 	}
 
@@ -478,6 +535,7 @@ qat_digest_fini(void)
 
 	/* initialized statically */
 	DESTROY_CACHE(opCache);
+	DESTROY_CACHE(bufferCache);
 
 	/* initialized dynamically */
 	write_lock_irqsave(&session_cache_lock, flags);
@@ -592,10 +650,11 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
     {
 	// get type of instance, polled (1) or interrupt (0)
 	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-	if (CPA_STATUS_SUCCESS == status)
-	{
-	    *polled = instanceInfo->isPolled;
-	}
+    }
+
+    if (CPA_STATUS_SUCCESS == status)
+    {
+	*polled = instanceInfo->isPolled;
     }
 
     VIRT_FREE(instanceInfo);
@@ -619,10 +678,11 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
     {
         // get name of instance
 	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-	if (CPA_STATUS_SUCCESS == status)
-	{
-	    strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
-	}
+    }
+
+    if (CPA_STATUS_SUCCESS == status)
+    {
+	strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
     }
 
     VIRT_FREE(instanceInfo);
@@ -798,7 +858,6 @@ done:
 static inline void
 symSessionWaitForInflightReq(CpaCySymSessionCtx pSessionCtx)
 {
-
 /* Session in use is available since Cryptographic API version 2.2 */
 #if CY_API_VERSION_AT_LEAST(2, 2)
     CpaBoolean sessionInUse = CPA_FALSE;
@@ -935,7 +994,14 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
     /* Allocate Src buffer */
     if (CPA_STATUS_SUCCESS == status)
     {
-    	status = PHYS_CONTIG_ALLOC(&pSrcBuffer, bufferSize);
+    	// status = PHYS_CONTIG_ALLOC_ALIGNED(&pSrcBuffer, bufferSize, DEFAULT_ALIGN_ALLOC);
+	status = CREATE_BUFFER(&pSrcBuffer);
+	if (CPA_STATUS_SUCCESS != status)
+	{
+		printk(KERN_WARNING LOG_PREFIX "failed to allocate %d bytes for input buffer\n",
+			bufferSize);
+		QAT_STAT_BUMP(err_out_of_mem);
+	}
     }
 
     if (CPA_STATUS_SUCCESS == status)
@@ -948,6 +1014,11 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
          * memory.
          */
         status = CREATE_OPDATA(&pOpData);
+	if (CPA_STATUS_SUCCESS != status)
+	{
+		printk(KERN_WARNING LOG_PREFIX "failed to allocate opData\n");
+		QAT_STAT_BUMP(err_out_of_mem);
+	}
     }
 
     if (CPA_STATUS_SUCCESS == status)
@@ -1009,7 +1080,8 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 	registerFailedRequest(algo);
     }
 
-    PHYS_CONTIG_FREE(pSrcBuffer);
+    // PHYS_CONTIG_FREE(pSrcBuffer);
+    DESTROY_BUFFER(pSrcBuffer);
     DESTROY_OPDATA(pOpData);
     VIRT_FREE(pComplete);
 
