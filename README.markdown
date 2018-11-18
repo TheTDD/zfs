@@ -1,3 +1,5 @@
+Attention: development in this branch is stopped. Further development of QAT will be continued in [0.7.12](https://github.com/TheTDD/zfs/tree/0.7.12-qat) branch. Please upgrade your ZFS.
+
 # Release info
 
 This branch is build on [ZoL release 0.7.11](https://github.com/zfsonlinux/zfs/tree/zfs-0.7.11) and contains the completely new implementation of [Intel QuickAsssist](https://01.org/intel-quickassist-technology) Hardware support for GZIP filesystem compression and SHA2-256 (also SHA2-512 and SHA3-256 when it will needed) checksums.
