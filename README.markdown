@@ -32,27 +32,27 @@ parm:           zfs_qat_disable:completely disable any access to QAT (int)
 # ZFS module statistics compression/decompression
 ```
 [root@bg]# cat /proc/spl/kstat/zfs/qat-dc
-18 1 0x01 31 8432 14126649075 38891277718272
+18 1 0x01 31 8432 14120743908 7045360623020
 name                            type data
 init_failed                     4    0
-comp_requests                   4    48521
-comp_total_in_bytes             4    6222791680
-comp_total_success_bytes        4    3051441152
-comp_total_out_bytes            4    923322764
-comp_fails                      4    24199
-comp_throughput_bps             4    78242080
-decomp_requests                 4    64378
-decomp_total_in_bytes           4    2499597312
-decomp_total_success_bytes      4    2499597312
-decomp_total_out_bytes          4    8421071872
+comp_requests                   4    246355
+comp_total_in_bytes             4    31067879936
+comp_total_success_bytes        4    28560988672
+comp_total_out_bytes            4    13076317638
+comp_fails                      4    22437
+comp_throughput_bps             4    112444837
+decomp_requests                 4    604924
+decomp_total_in_bytes           4    60516649472
+decomp_total_success_bytes      4    60516649472
+decomp_total_out_bytes          4    79038761984
 decomp_fails                    4    0
-decomp_throughput_bps           4    323887379
+decomp_throughput_bps           4    309955929
 err_no_instance_available       4    0
 err_out_of_mem                  4    0
 err_timeout                     4    0
 err_gen_header                  4    0
 err_gen_footer                  4    0
-err_overflow                    4    24199
+err_overflow                    4    22437
 err_status_fail                 4    0
 err_status_retry                4    0
 err_status_param                4    0
@@ -69,15 +69,15 @@ err_op_unknown                  4    0
 # ZFS module statistics checksums
 ```
 [root@bg]# cat /proc/spl/kstat/zfs/qat-cy
-19 1 0x01 16 4352 14126679200 38911372815691
+19 1 0x01 16 4352 14120886992 7065455766148
 name                            type data
 init_failed                     4    0
-sha2_256_requests               4    192209
-sha2_256_total_in_bytes         4    16054835712
-sha2_256_total_success_bytes    4    16054835712
-sha2_256_total_out_bytes        4    6150688
+sha2_256_requests               4    1110042
+sha2_256_total_in_bytes         4    109949473280
+sha2_256_total_success_bytes    4    109949473280
+sha2_256_total_out_bytes        4    35521344
 sha2_256_fails                  4    0
-sha2_256_throughput_bps         4    243255086
+sha2_256_throughput_bps         4    408734101
 err_no_instance_available       4    0
 err_out_of_mem                  4    0
 err_timeout                     4    0
