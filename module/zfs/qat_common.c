@@ -144,7 +144,7 @@ find_order(uint16_t bytes)
         int i;
         int result = -1;
 
-        for (i=0; i<MAX_ORDER; i++)
+        for (i = 0; i < MAX_ORDER; i++)
         {
                 if (bytes <= PAGE_SIZE * (1 << i))
                 {
@@ -156,6 +156,14 @@ find_order(uint16_t bytes)
         return result;
 }
 
+static inline void
+highmem_alloc_clean(qat_highmem_t *addr)
+{
+	addr->ready = CPA_FALSE;
+	addr->page = NULL;
+	addr->ptr = NULL;
+}
+
 CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
 {
 	CpaStatus status = CPA_STATUS_FAIL;
@@ -164,14 +172,14 @@ CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
 	int order = find_order(size);
 
 	// clean structure to avoid issues by deallocations
-	memset(addr, 0 , sizeof(qat_highmem_t));
+	highmem_alloc_clean(addr);
 
 	if (order >= 0)
 	{
 		page = alloc_pages(GFP_HIGHUSER, order);
 		if (page == NULL)
 		{
-		    printk(KERN_ALERT "page allocation for %ld bytes failed\n", (long)PAGE_SIZE * (1 << order));
+		    printk(KERN_ALERT "page allocation for %ld bytes (order %d) failed, requested %d\n", (long)PAGE_SIZE * (1 << order), order, size);
 		    status = CPA_STATUS_RESOURCE;
 		    goto out;
 		}
@@ -180,8 +188,9 @@ CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
 		memory = kmap(page);
 		if (memory == NULL)
 		{
+		    // free page because we can't use it (no mapping)
 		    __free_pages(page, order);
-		    printk(KERN_ALERT "page mapping for %ld bytes failed\n", (long)PAGE_SIZE * (1 << order));
+		    printk(KERN_ALERT "page mapping for %ld bytes (order %d) failed, requested %d\n", (long)PAGE_SIZE * (1 << order), order, size);
 		    status = CPA_STATUS_RESOURCE;
 		    goto out;
 		}
@@ -189,6 +198,7 @@ CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
 		addr->page = page;
 		addr->ptr = memory;
 		addr->order = order;
+		addr->ready = CPA_TRUE;
 		status = CPA_STATUS_SUCCESS;
 	}
 
@@ -200,17 +210,22 @@ out:
 
 void highmem_free(qat_highmem_t* addr)
 {
+    if (addr->ready)
+    {
 	if (addr->ptr != NULL && addr->page != NULL)
 	{
+		// mapping present
 		kunmap(addr->page);
 	}
 
 	if (addr->page != NULL)
 	{
+		// page allocated, free now
 		__free_pages(addr->page, addr->order);
 	}
 
-	memset(addr, 0, sizeof(qat_highmem_t));
+	highmem_alloc_clean(addr);
+     }
 }
 
 int zfs_qat_init_failure_threshold = 100;

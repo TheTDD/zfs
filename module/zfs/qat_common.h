@@ -36,8 +36,9 @@
 
 typedef struct qat_highmem
 {
-	struct page *page;
+	CpaBoolean ready;
 	uint8_t order;
+	struct page *page;
 	void *ptr;
 } qat_highmem_t;
 
@@ -86,7 +87,7 @@ extern CpaStatus mem_alloc_virtual(void **ppMemAddr, const Cpa32U sizeBytes);
 extern void mem_free_virtual(void **ppMemAddr);
 
 #define ceil(n, d) (((n) < 0) ? (-((-(n))/(d))) : (n)/(d) + ((n)%(d) != 0))
-#define multipleOf64(n) (64 * ceil((n), 64))
+#define floor(n, d) (((n) < 0) ? (-((-(n))/(d))) - ((n)%(d) != 0) : (n)/(d))
 
 extern int zfs_qat_init_failure_threshold;
 extern int zfs_qat_disable;

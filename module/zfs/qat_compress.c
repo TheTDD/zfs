@@ -525,6 +525,22 @@ _destroy_session(CpaDcSessionHandle *sessionCtx)
 	}
 }
 
+// static inline CpaStatus
+// getReadyInstanceBuffer(int instanceNr, qat_highmem_t *allocation)
+// {
+// }
+
+/*
+static inline void
+clearInstanceBuffers()
+{
+	int i=0;
+	for(i = 0; i < MAX_INSTANCES; i++)
+	{
+	}
+}
+*/
+
 static void
 cacheConstructor(void *pOpData)
 {
@@ -535,7 +551,7 @@ int
 qat_compress_init(void)
 {
 	Cpa16U numInstances = 0;
-    
+
     	/* max size of output buffer on compression is the max size of buffers used */
     	int bufferSize = ceil( 9 * QAT_MAX_BUF_SIZE, 8 ) + 55;
 
@@ -1686,7 +1702,8 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 	Cpa32U buffMetaSize = 0;
 	/* Implementation requires an intermediate buffer approximately
                            twice the size of the output buffer */
-	Cpa32U bufSize = 2 * dest_len;
+	/* Reduce to PAGE_SIZE (4K) to save memory */
+	Cpa32U bufSize = PAGE_SIZE * floor(2 * dest_len, PAGE_SIZE);
 
 	/*
 	 * In this simplified version of instance discovery, we discover
@@ -1812,8 +1829,9 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 			} /* End numInterBuffLists */
 
 			if (CPA_STATUS_SUCCESS != status) {
-				printk(KERN_ALERT LOG_PREFIX "failed allocating %d intermediate buffers of size %d and metasize %d\n", 
+				printk(KERN_ALERT LOG_PREFIX "failed allocating %d intermediate buffers of size %d and metasize %d\n",
 					numInterBuffLists, bufSize, buffMetaSize);
+				QAT_STAT_BUMP(err_out_of_mem);
 			}
 		}
 	}
