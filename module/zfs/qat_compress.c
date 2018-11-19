@@ -244,6 +244,7 @@ static spinlock_t compression_time_lock;
 static spinlock_t decompression_time_lock;
 static rwlock_t session_cache_lock;
 
+static atomic_long_t noInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
 
@@ -1104,8 +1105,13 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
 
 	if (unlikely(!instanceFound))
 	{
+
+        	if (jiffies_to_msecs(jiffies - atomic_long_read(&noInstanceMessageShown)) > 60L * 1000L)
+        	{
+			printk(KERN_WARNING LOG_PREFIX "failed to find free DC instance ouf of %d, consider to increase NumberDcInstances in [KERNEL_QAT] section\n", num_inst);
+                	atomic_long_set(&noInstanceMessageShown, jiffies);
+        	}
 		status = CPA_STATUS_RESOURCE;
-		printk(KERN_WARNING LOG_PREFIX "failed to find free DC instance ouf of %d, consider to increase NumberDcInstances in [KERNEL_QAT] section\n", num_inst);
 		QAT_STAT_BUMP(err_no_instance_available);
 	}
 	else
