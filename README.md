@@ -1,3 +1,6 @@
+For actual release for ZFS 0.7.12 - click [here](https://github.com/TheTDD/zfs/tree/0.7.12-qat)
+Outdated implementation for ZFS 0.7.11 - click [here](https://github.com/TheTDD/zfs/tree/0.7.11-qat)
+
 ![img](http://zfsonlinux.org/images/zfs-linux.png)
 
 ZFS on Linux is an advanced file system and volume manager which was originally
