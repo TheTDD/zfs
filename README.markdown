@@ -10,13 +10,31 @@ News on this release:
 - support of GZIP compression level (gzip-1 to gzip-9)
 - statistics `/proc/spl/kstat/zfs/qat` changed to `/proc/spl/kstat/zfs/qat-dc`, added new statistics `/proc/spl/kstat/zfs/qat-cy`
 - extended statistics includes throughput and counts of errors and operation status
-- statistics is visible always even if QAT is not exists or is not initialized, but remains zero of course
-- implementation is using exclusively kernel memory caches for flat source, destination and intermediate buffers to avoid valuable kernel memory fragmentation
-- qat compression, decompression and checksum can be disabled independently (for by example benchmarking, comparing with sw-implementation or development/debugging purposes)
+- statistics is visible always even if QAT not present or is not initialized, but remains zero of course
+- implementation is using kernel memory caches for flat source, destination and intermediate buffers to avoid valuable kernel memory fragmentation, and virtual/high memory wherever it is possible.
+- QAT compression, decompression and checksum can be disabled independently (for by example benchmarking, comparing with SW-implementation or development/debugging purposes)
 - access to QAT can be disabled completely with `zfs_qat_disable` parameter
 - QAT support disables itself automatically (independent for DC and CY) if can't initialize corresponding DC or CY instances after configurable number of requests (default 100). The threshold is configurable by zfs module parameter `zfs_qat_init_failure_threshold`
 
 To avoid initialization failures at boot time caused by QAT starting later then ZFS module is loaded I can suggest to put `options zfs zfs_qat_disable=1` into `/etc/modprobe.d/zfs.conf`, then create a systemd service which starts after QAT and enables QAT in ZFS with `echo 0 > /sys/modules/zfs/parameters/zfs_qat_disable`.
+
+```
+# cat /etc/systemd/system/zfs-qat.service 
+[Unit]
+Description=Intel QuickAssist Support for ZFS file system
+DefaultDependencies=no
+After=qat_service.service
+After=zfs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/zfs_qat on
+ExecStop=/usr/local/bin/zfs_qat off
+
+[Install]
+WantedBy=multi-user.target
+```
 
 # ZFS module parameters
 ```
