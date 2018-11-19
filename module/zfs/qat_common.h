@@ -28,7 +28,6 @@
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <linux/completion.h>
-// #include <sys/zfs_context.h>
 
 #include <cpa.h>
 
@@ -54,14 +53,14 @@ void highmem_free(qat_highmem_t* addr);
 */
 
 /*
-For optimal performance, ensure the following:
-• All data buffers should be aligned on a 64-byte boundary.
-• Transfer sizes that are multiples of 64 bytes are optimal.
-• Small data transfers (less than 64 bytes) should be avoided. If a small data
+For optimal performance on PCI bus, ensure the following:
+- All data buffers should be aligned on a 64-byte boundary.
+- Transfer sizes that are multiples of 64 bytes are optimal.
+- Small data transfers (less than 64 bytes) should be avoided. If a small data
   transfer is needed, consider embedding this within a larger buffer so that the
   transfer size is a multiple of 64 bytes. Offsets can then be used to identify the
   region of interest within the larger buffer.
-• Each buffer entry within a Scatter-Gather-List (SGL) should be a multiple of
+- Each buffer entry within a Scatter-Gather-List (SGL) should be a multiple of
   64bytes and should be aligned on a 64-byte boundary.
 */
 
@@ -94,7 +93,7 @@ extern int zfs_qat_disable;
 
 #define USEC_IN_SEC     1000000UL
 
-#define DESTROY_CACHE(cache) if (NULL != cache) { kmem_cache_destroy(cache); cache = NULL; }
+#define DESTROY_CACHE(cache) if (likely(NULL != (cache))) { kmem_cache_destroy(cache); cache = NULL; }
 
 #define DEFAULT_ALIGN_CACHE 	8
 #define DEFAULT_ALIGN_ALLOC	1

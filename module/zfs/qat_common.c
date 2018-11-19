@@ -48,7 +48,7 @@ _mem_alloc_contig(void **ppMemAddr, const Cpa32U sizeBytes)
     *ppMemAddr = NULL;
 
     pAlloc = kmalloc((sizeBytes + sizeof(void *)), GFP_KERNEL);
-    if (NULL == pAlloc)
+    if (unlikely(NULL == pAlloc))
     {
 	return CPA_STATUS_RESOURCE;
     }
@@ -71,7 +71,7 @@ _mem_alloc_contig_aligned(void **ppMemAddr, const Cpa32U sizeBytes, const Cpa32U
 
     // pAlloc = kmalloc_node((sizeBytes + alignment + sizeof(void *)), GFP_KERNEL, 0);
     pAlloc = kmalloc((sizeBytes + alignment + sizeof(void *)), GFP_KERNEL);
-    if (NULL == pAlloc)
+    if (unlikely(NULL == pAlloc))
     {
 	return CPA_STATUS_RESOURCE;
     }
@@ -107,7 +107,7 @@ void
 mem_free_contig(void **ppMemAddr)
 {
     void *pAlloc = NULL;
-    if (NULL != *ppMemAddr)
+    if (likely(NULL != *ppMemAddr))
     {
         pAlloc = (void *)(*((ADDR_LEN *)(*ppMemAddr - sizeof(void *))));
         kfree(pAlloc);
@@ -116,11 +116,11 @@ mem_free_contig(void **ppMemAddr)
 }
 
 CpaStatus
-mem_alloc_virtual(void **ppMemAddr, const Cpa32U sizeBytes) 
+mem_alloc_virtual(void **ppMemAddr, const Cpa32U sizeBytes)
 {
     *ppMemAddr = vmalloc(sizeBytes);
 
-    if (NULL == *ppMemAddr) 
+    if (unlikely(NULL == *ppMemAddr))
     {
 	return CPA_STATUS_RESOURCE;
     }
@@ -129,9 +129,9 @@ mem_alloc_virtual(void **ppMemAddr, const Cpa32U sizeBytes)
 }
 
 void
-mem_free_virtual(void **ppMemAddr) 
+mem_free_virtual(void **ppMemAddr)
 {
-    if (NULL != *ppMemAddr) 
+    if (likely(NULL != *ppMemAddr))
     {
 	vfree(*ppMemAddr);
 	*ppMemAddr = NULL;
@@ -171,24 +171,24 @@ CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
 	void *memory = NULL;
 	int order = find_order(size);
 
-	// clean structure to avoid issues by deallocations
+	/* clean structure to avoid issues by deallocations */
 	highmem_alloc_clean(addr);
 
-	if (order >= 0)
+	if (likely(order >= 0))
 	{
 		page = alloc_pages(GFP_HIGHUSER, order);
-		if (page == NULL)
+		if (unlikely(NULL == page))
 		{
 		    printk(KERN_ALERT "page allocation for %ld bytes (order %d) failed, requested %d\n", (long)PAGE_SIZE * (1 << order), order, size);
 		    status = CPA_STATUS_RESOURCE;
 		    goto out;
 		}
 
-		// TODO: kmap_nonblock doesn't exist
+		// TODO: kmap_nonblock doesn't exist in current kernel
 		memory = kmap(page);
-		if (memory == NULL)
+		if (unlikely(NULL == memory))
 		{
-		    // free page because we can't use it (no mapping)
+		    /* free page because we can't use it (no mapping) */
 		    __free_pages(page, order);
 		    printk(KERN_ALERT "page mapping for %ld bytes (order %d) failed, requested %d\n", (long)PAGE_SIZE * (1 << order), order, size);
 		    status = CPA_STATUS_RESOURCE;
@@ -201,26 +201,23 @@ CpaStatus highmem_alloc(qat_highmem_t *addr, uint16_t size)
 		addr->ready = CPA_TRUE;
 		status = CPA_STATUS_SUCCESS;
 	}
-
 out:
-
 	return status;
-
 }
 
 void highmem_free(qat_highmem_t* addr)
 {
-    if (addr->ready)
+    if (likely(addr->ready))
     {
-	if (addr->ptr != NULL && addr->page != NULL)
+	if (likely(addr->ptr != NULL && addr->page != NULL))
 	{
-		// mapping present
+		/* mapping present */
 		kunmap(addr->page);
 	}
 
-	if (addr->page != NULL)
+	if (likely(addr->page != NULL))
 	{
-		// page allocated, free now
+		/* page allocated, free now */
 		__free_pages(addr->page, addr->order);
 	}
 
