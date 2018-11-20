@@ -220,12 +220,29 @@ qat_stats_t qat_dc_stats = {
 		{ "err_op_unknown",                     KSTAT_DATA_UINT64 },
 };
 
+typedef struct qat_instance_info
+{
+	CpaInstanceHandle dcInstHandle;
+	CpaBoolean instanceStarted;
+	CpaBoolean instanceReady;
+	CpaBoolean polled;
+	CpaBoolean capable;
+	CpaBoolean contig;
+	CpaBoolean autoSelectBestHuffmanTree;
+
+        Cpa16U numInterBuffLists;
+	CpaBufferList **bufferInterArray;
+
+} qat_instance_info_t;
+
 /* 128 is a maximum number of DC instances on one QAT controller */
 #define MAX_INSTANCES 128
 
 /* module parameters */
 int zfs_qat_disable_compression = 0;
 int zfs_qat_disable_decompression = 0;
+
+static qat_instance_info_t *instances = NULL;
 
 static kstat_t *qat_ksp = NULL;
 static struct kmem_cache *opCache = NULL;
@@ -255,6 +272,311 @@ static volatile struct timespec decompressionTime = {0};
 		atomic_add_64(&qat_dc_stats.stat.value.ui64, (val));
 #define	QAT_STAT_BUMP(stat) \
 		QAT_STAT_INCR(stat, 1);
+
+static void
+qat_dc_callback_interrupt(CpaDcDpOpData *pOpData)
+{
+	if (likely(pOpData->pCallbackTag != NULL))
+	{
+		complete((struct completion *)pOpData->pCallbackTag);
+	}
+}
+
+static void
+qat_dc_callback_polled(CpaDcDpOpData *pOpData)
+{
+	pOpData->pCallbackTag = (void *)1;
+}
+
+static CpaStatus
+requiresPhysicallyContiguousMemory(const CpaInstanceHandle dcInstHandle, CpaBoolean *contig)
+{
+	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaInstanceInfo2 *instanceInfo = NULL;
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		*contig = instanceInfo->requiresPhysicallyContiguousMemory;
+	}
+
+	VIRT_FREE(instanceInfo);
+
+	return status;
+}
+
+
+static CpaStatus
+isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
+{
+	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaInstanceInfo2 *instanceInfo = NULL;
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		// get type of instance, polled (1) or interrupt (0)
+		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		*polled = instanceInfo->isPolled;
+	}
+
+	VIRT_FREE(instanceInfo);
+
+	return status;
+}
+
+static CpaStatus
+releaseInstanceInfo(qat_instance_info_t *info)
+{
+    CpaStatus status = CPA_STATUS_SUCCESS;
+    Cpa16U bufferNum;
+
+    if (likely(info->instanceStarted))
+    {
+	cpaDcStopInstance(info->dcInstHandle);
+	info->instanceStarted = CPA_FALSE;
+    }
+
+    /* Free intermediate buffers */
+    if (likely(info->bufferInterArray != NULL))
+    {
+            for (bufferNum = 0; bufferNum < info->numInterBuffLists; bufferNum++)
+            {
+		if (likely((info->bufferInterArray[bufferNum] != NULL))
+		{
+		     if (likely(info->bufferInterArray[bufferNum]->pBuffers != NULL))
+	 	     {
+                     	PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]->pBuffers->pData);
+               	     	PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]->pBuffers);
+                     	// DESTROY_FLATBUFFER(bufferInterArray[bufferNum]->pBuffers);
+		     }
+                     PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]->pPrivateMetaData);
+                     // DESTROY_METADATA(bufferInterArray[bufferNum]->pPrivateMetaData);
+                     PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]);
+                     // DESTROY_BUFFERLIST(bufferInterArray[bufferNum]);
+		}
+            }
+            PHYS_CONTIG_FREE(info->bufferInterArray);
+            // DESTROY_BUFFERLISTPTR(bufferInterArray);
+    }
+
+    return (status);
+}
+
+static CpaStatus
+getReadyInstanceInfo(const CpaInstanceHandle dcInstHandle, qat_instance_info_t *info)
+{
+    CpaStatus status = CPA_STATUS_FAIL;
+    CpaDcInstanceCapabilities *pCap = NULL;
+    Cpa16U bufferNum;
+    Cpa32U buffMetaSize = 0;
+
+    /* Implementation requires an intermediate buffer approximately
+                           twice the size of the output buffer */
+    /* Reduce to PAGE_SIZE (4K) to save memory */
+    Cpa32U bufSize = PAGE_SIZE * floor(2 * QAT_MAX_BUF_SIZE, PAGE_SIZE);
+
+
+    if (info->instanceReady) 
+    {
+	status = CPA_STATUS_SUCCESS;
+    }
+    else 
+    {
+    	status = VIRT_ALLOC(&pCap, sizeof(CpaDcInstanceCapabilities));
+    	if (unlikely(CPA_STATUS_SUCCESS != status))
+    	{
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate memory for capabilities, size=%lu (status=%d)\n",
+				sizeof(CpaDcInstanceCapabilities), status);
+		goto failed;
+    	}
+
+    	/* Query Capabilities */
+    	status = cpaDcQueryCapabilities(dcInstHandle, pCap);
+    	if (unlikely(status != CPA_STATUS_SUCCESS))
+    	{
+		printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities (status=%d)\n", status);
+		goto failed;
+    	}
+
+    	if (unlikely(!pCap->statelessDeflateDecompression ||
+			!pCap->statelessDeflateCompression ||
+			!pCap->checksumAdler32 ||
+			!pCap->dynamicHuffman))
+	{
+		printk(KERN_CRIT LOG_PREFIX "unsupported functionality\n");
+	    status = CPA_STATUS_FAIL;
+		goto failed;
+	}
+
+	info->capable = CPA_TRUE;
+	info->autoSelectBestHuffmanTree = pCap->autoSelectBestHuffmanTree;
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = requiresPhysicallyContiguousMemory(dcInstHandle, &info->contig);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		if (pCap->dynamicHuffmanBufferReq)
+		{
+		    status = cpaDcBufferListGetMetaSize(dcInstHandle, 1, &buffMetaSize);
+
+                        if (CPA_STATUS_SUCCESS == status)
+                        {
+                                status = cpaDcGetNumIntermediateBuffers(dcInstHandle, &info->numInterBuffLists);
+                        }
+
+		    /*
+		        if (CPA_STATUS_SUCCESS == status)
+                        {   
+                            status = getReadyMetadataCache(buffMetaSize);
+                        }
+
+                        if (CPA_STATUS_SUCCESS == status)
+                        {
+                            status = getReadyBufferListPtrCache(numInterBuffLists * sizeof(CpaBufferList *));
+                        }
+			*/
+                        if (CPA_STATUS_SUCCESS == status && 0 != info->numInterBuffLists)
+                        {
+                                // TODO dyn cache
+                                status = PHYS_CONTIG_ALLOC(&info->bufferInterArray, info->numInterBuffLists * sizeof(CpaBufferList *));
+                                // status = CREATE_BUFFERLISTPTR(&bufferInterArray);
+                        }
+
+                        for (bufferNum = 0; bufferNum < info->numInterBuffLists; bufferNum++)
+                        {
+
+                                if (CPA_STATUS_SUCCESS == status)
+                                {
+                                        // TODO: static cache
+                                        status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum], sizeof(CpaBufferList));
+                                        // status = CREATE_BUFFERLIST(&bufferInterArray[bufferNum]);
+                                }
+                                else
+                                {
+                                        break;
+                                }
+
+                                if (CPA_STATUS_SUCCESS == status)
+                                {
+                                        // TODO: dyn cache
+                                        status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum]->pPrivateMetaData, buffMetaSize);
+                                        // status = CREATE_METADATA(&bufferInterArray[bufferNum]->pPrivateMetaData);
+                                }
+                                else
+                                {
+                                        break;
+                                }
+
+			        if (CPA_STATUS_SUCCESS == status)
+                                {
+                                        status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum]->pBuffers, sizeof(CpaFlatBuffer));
+                                        // status = CREATE_FLATBUFFER(&bufferInterArray[bufferNum]->pBuffers);
+                                }
+                                else
+                                {
+                                        break;
+                                }
+
+                                if (CPA_STATUS_SUCCESS == status) {
+                                    /* Implementation requires an intermediate buffer approximately
+                                        twice the size of the output buffer */
+                                        status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum]->pBuffers->pData, bufSize);
+                                        info->bufferInterArray[bufferNum]->numBuffers = 1;
+                                        info->bufferInterArray[bufferNum]->pBuffers->dataLenInBytes = bufSize;
+                                }
+                                else
+                                {
+                                        break;
+                                }
+
+                        } /* End numInterBuffLists */
+
+			if (unlikely(CPA_STATUS_SUCCESS != status))
+			{
+				printk(KERN_ALERT LOG_PREFIX "failed allocating %d intermediate buffers of size %d and metasize %d\n",
+					info->numInterBuffLists, bufSize, buffMetaSize);
+				QAT_STAT_BUMP(err_out_of_mem);
+			}
+		}
+	}
+
+	/*
+	 * Set the address translation function for the instance
+	 */
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = cpaDcSetAddressTranslation(dcInstHandle, (void *)virt_to_phys);
+	}
+
+	/* Start DataCompression instance */
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = cpaDcStartInstance(dcInstHandle, info->numInterBuffLists, info->bufferInterArray);
+		if (unlikely(CPA_STATUS_SUCCESS != status))
+		{
+			printk(KERN_CRIT LOG_PREFIX "failed to start instance with %d buffers of %d (+%d metasize) (status=%d)\n",
+					info->numInterBuffLists, bufSize, buffMetaSize, status);
+		}
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+	    	info->dcInstHandle = dcInstHandle;
+		info->instanceStarted = CPA_TRUE;
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = isInstancePolled(dcInstHandle, &info->polled);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		/* Register callback function for the instance */
+		if (info->polled)
+		{
+			status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_polled);
+		}
+		else
+		{
+			status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_interrupt);
+		}
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+	    info->instanceReady = CPA_TRUE;
+	}
+
+    }
+
+failed:
+
+	VIRT_FREE(pCap);
+
+	return (status);
+}
 
 static inline int
 getNextInstance(Cpa16U num_inst)
@@ -541,9 +863,25 @@ int
 qat_compress_init(void)
 {
 	Cpa16U numInstances = 0;
+    CpaStatus status = CPA_STATUS_FAIL;
 
     	/* max size of output buffer on compression is the max size of buffers used */
     	int bufferSize = ceil( 9 * QAT_MAX_BUF_SIZE, 8 ) + 55;
+
+	int qatInfoSize = MAX_INSTANCES * sizeof(qat_instance_info_t);
+
+	status = VIRT_ALLOC(&instances, qatInfoSize);
+	if (unlikely(CPA_STATUS_SUCCESS != status))
+	{
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate instance cache storage (%d)\n",
+		       qatInfoSize);
+		goto err;
+	}
+	else
+	{
+		// clean memory
+		memset(instances, 0, qatInfoSize);
+	}
 
 	/* use caches to avoid kernel memory fragmentation */
 	opCache = kmem_cache_create("CpaDcDpOpData",
@@ -620,6 +958,17 @@ void
 qat_compress_fini(void)
 {
 	unsigned long flags;
+    	int i;
+
+	if (likely(instances != NULL))
+	{
+		for (i = 0; i < MAX_INSTANCES; i++)
+		{
+			releaseInstanceInfo(&instances[i]);
+		}
+
+		VIRT_FREE(instances);
+	}
 
 	if (likely(NULL != qat_ksp))
 	{
@@ -851,80 +1200,12 @@ register_op_status(const CpaStatus status) {
 	}
 }
 
-static void
-qat_dc_callback_interrupt(CpaDcDpOpData *pOpData)
-{
-	if (likely(pOpData->pCallbackTag != NULL))
-	{
-		complete((struct completion *)pOpData->pCallbackTag);
-	}
-}
-
-static void
-qat_dc_callback_polled(CpaDcDpOpData *pOpData)
-{
-	pOpData->pCallbackTag = (void *)1;
-}
 
 static inline unsigned long
 getTimeoutMs(const int dataSize, const int maxSize)
 {
 	unsigned long timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
 	return timeout;
-}
-
-static CpaStatus
-requiresPhysicallyContiguousMemory(const CpaInstanceHandle dcInstHandle, boolean_t *contig)
-{
-	CpaStatus status = CPA_STATUS_SUCCESS;
-	CpaInstanceInfo2 *instanceInfo = NULL;
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		*contig = instanceInfo->requiresPhysicallyContiguousMemory;
-	}
-
-	VIRT_FREE(instanceInfo);
-
-	return status;
-}
-
-
-static CpaStatus
-isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
-{
-	CpaStatus status = CPA_STATUS_SUCCESS;
-	CpaInstanceInfo2 *instanceInfo = NULL;
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		// get type of instance, polled (1) or interrupt (0)
-		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		*polled = instanceInfo->isPolled;
-	}
-
-	VIRT_FREE(instanceInfo);
-
-	return status;
 }
 
 // WARNING: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name
@@ -956,7 +1237,7 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 }
 
 static CpaStatus
-waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs)
+waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOpData, const CpaBoolean polled, const unsigned long timeoutMs)
 {
 	CpaStatus status = CPA_STATUS_SUCCESS;
 	Cpa8U *instanceName = NULL;
@@ -1132,7 +1413,7 @@ done:
  */
 static qat_compress_status_t
 compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl,
-		boolean_t polled,
+		CpaBoolean polled, CpaBoolean contig, 
 		const char* src, const int src_len,
 		char* dest, const int dest_len, size_t *c_len)
 {
@@ -1160,15 +1441,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	Cpa32U foot_sz = 0;
 	Cpa32U compressed_sz = 0;
 
-	boolean_t contig = B_FALSE;
-
 	QAT_STAT_BUMP(comp_requests);
 	QAT_STAT_INCR(comp_total_in_bytes, src_len);
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = requiresPhysicallyContiguousMemory(dcInstHandle, &contig);
-	}
 
 	if (CPA_STATUS_SUCCESS == status && !polled)
 	{
@@ -1445,7 +1719,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
  */
 static qat_compress_status_t
 decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl,
-		const boolean_t polled,
+		const CpaBoolean polled, const CpaBoolean contig,
 		const char* src, const int src_len,
 		char* dest, const int dest_len, size_t *c_len)
 {
@@ -1668,39 +1942,21 @@ compLevel(const int level)
  *
  *************************************************************************/
 static qat_compress_status_t
-qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSessionHandle, const boolean_t, const char*, const int, char*, const int, size_t*),
+qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSessionHandle, const CpaBoolean, const CpaBoolean, const char*, const int, char*, const int, size_t*),
 		const int level, const char* src, const int src_len, char* dest, const int dest_len, size_t *c_len)
 {
 
 	qat_compress_status_t ret = QAT_COMPRESS_FAIL;
-	boolean_t polled = B_FALSE;
+
 	int instNum;
-	boolean_t instanceStarted = B_FALSE;
-	boolean_t contig;
-	// one struct
-	qat_highmem_t bufferInterArrayAllocation;
-	// arrays of struct
-	qat_highmem_t *bufferAllocations = NULL;
-	qat_highmem_t *metadataAllocations = NULL;
-	qat_highmem_t *flatBufferAllocations = NULL;
 
 	CpaStatus status = CPA_STATUS_SUCCESS;
 	CpaDcSessionHandle sessionHdl = NULL;
 	CpaInstanceHandle dcInstHandle = NULL;
-	CpaDcInstanceCapabilities *pCap = NULL;
+
 	CpaDcSessionSetupData *pSd = NULL;
 	Cpa32U sess_size = 0;
 	Cpa32U ctx_size = 0;
-	/* Variables required to setup the intermediate buffer */
-	CpaBufferList *bufferInterArray = NULL;
-	Cpa16U numInterBuffLists = 0;
-	Cpa16U bufferNum = 0;
-	Cpa16U numInterBufs = 0;
-	Cpa32U buffMetaSize = 0;
-	/* Implementation requires an intermediate buffer approximately
-                           twice the size of the output buffer */
-	/* Reduce to PAGE_SIZE (4K) to save memory */
-	Cpa32U bufSize = PAGE_SIZE * floor(2 * dest_len, PAGE_SIZE);
 
 	/*
 	 * In this simplified version of instance discovery, we discover
@@ -1713,168 +1969,14 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 		goto failed;
 	}
 
-	status = VIRT_ALLOC(&pCap, sizeof(CpaDcInstanceCapabilities));
-	if (unlikely(CPA_STATUS_SUCCESS != status))
+	status = getReadyInstanceInfo(dcInstHandle, &instances[instNum]);
+	if (CPA_STATUS_SUCCESS != status)
 	{
-		printk(KERN_CRIT LOG_PREFIX "failed to allocate memory for capabilities, size=%lu (status=%d)\n",
-				sizeof(CpaDcInstanceCapabilities), status);
-		goto failedAfterInit;
-	}
-
-	/* Query Capabilities */
-	status = cpaDcQueryCapabilities(dcInstHandle, pCap);
-	if (unlikely(status != CPA_STATUS_SUCCESS))
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities (status=%d)\n", status);
-		goto failedAfterInit;
-	}
-
-	if (unlikely(!pCap->statelessDeflateDecompression ||
-			!pCap->statelessDeflateCompression ||
-			!pCap->checksumAdler32 ||
-			!pCap->dynamicHuffman))
-	{
-		printk(KERN_CRIT LOG_PREFIX "unsupported functionality\n");
-		goto failedAfterInit;
+	    goto failed;
 	}
 
 	/* drop counter after successfull init */
 	atomic_set(&numInitFailed, 0);
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = requiresPhysicallyContiguousMemory(dcInstHandle, &contig);
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		if (pCap->dynamicHuffmanBufferReq)
-		{
-			status = cpaDcBufferListGetMetaSize(dcInstHandle, 1, &buffMetaSize);
-
-			if (likely(CPA_STATUS_SUCCESS == status))
-			{
-				status = cpaDcGetNumIntermediateBuffers(dcInstHandle, &numInterBuffLists);
-			}
-			if (CPA_STATUS_SUCCESS == status && contig)
-			{
-				status = VIRT_ALLOC(&bufferAllocations, numInterBuffLists * sizeof(qat_highmem_t));
-			}
-			if (likely(CPA_STATUS_SUCCESS == status))
-			{
-				status = VIRT_ALLOC(&metadataAllocations, numInterBuffLists * sizeof(qat_highmem_t));
-			}
-			if (likely(CPA_STATUS_SUCCESS == status))
-			{
-				status = VIRT_ALLOC(&flatBufferAllocations, numInterBuffLists * sizeof(qat_highmem_t));
-			}
-			if (likely(CPA_STATUS_SUCCESS == status && 0 != numInterBuffLists))
-			{
-				// status = PHYS_CONTIG_ALLOC(&bufferInterArray, numInterBuffLists * sizeof(CpaBufferList));
-				status = HIGHMEM_CONTIG_ALLOC(&bufferInterArrayAllocation, numInterBuffLists * sizeof(CpaBufferList));
-				bufferInterArray = bufferInterArrayAllocation.ptr;
-			}
-			if (likely(CPA_STATUS_SUCCESS == status))
-			{
-				memset(bufferInterArray, 0, numInterBuffLists * sizeof(CpaBufferList));
-			}
-
-			for (bufferNum = 0; bufferNum < numInterBuffLists; bufferNum++)
-			{
-				if (likely(CPA_STATUS_SUCCESS == status))
-				{
-					status = HIGHMEM_CONTIG_ALLOC(&metadataAllocations[bufferNum], buffMetaSize);
-					bufferInterArray[bufferNum].pPrivateMetaData = metadataAllocations[bufferNum].ptr;
-				}
-				else
-				{
-					break;
-				}
-
-				if (likely(CPA_STATUS_SUCCESS == status))
-				{
-					// status = PHYS_CONTIG_ALLOC(&bufferInterArray[bufferNum].pBuffers, sizeof(CpaFlatBuffer));
-					status = HIGHMEM_CONTIG_ALLOC(&flatBufferAllocations[bufferNum], sizeof(CpaFlatBuffer));
-					bufferInterArray[bufferNum].pBuffers = flatBufferAllocations[bufferNum].ptr;
-				}
-				else
-				{
-					break;
-				}
-
-				if (likely(CPA_STATUS_SUCCESS == status))
-				{
-					if (contig)
-					{
-						// allocate highmemory and assign to pData
-						status = HIGHMEM_CONTIG_ALLOC(&bufferAllocations[bufferNum], bufSize);
-						bufferInterArray[bufferNum].pBuffers->pData = bufferAllocations[bufferNum].ptr;
-					}
-					else
-					{
-						status = VIRT_ALLOC(&bufferInterArray[bufferNum].pBuffers->pData, bufSize);
-					}
-
-					bufferInterArray[bufferNum].numBuffers = 1;
-					bufferInterArray[bufferNum].pBuffers->dataLenInBytes = bufSize;
-				}
-				else
-				{
-					break;
-				}
-
-			} /* End numInterBuffLists */
-
-			if (unlikely(CPA_STATUS_SUCCESS != status))
-			{
-				printk(KERN_ALERT LOG_PREFIX "failed allocating %d intermediate buffers of size %d and metasize %d\n",
-					numInterBuffLists, bufSize, buffMetaSize);
-				QAT_STAT_BUMP(err_out_of_mem);
-			}
-		}
-	}
-
-	/*
-	 * Set the address translation function for the instance
-	 */
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = cpaDcSetAddressTranslation(dcInstHandle, (void *)virt_to_phys);
-	}
-
-	/* Start DataCompression instance */
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = cpaDcStartInstance(dcInstHandle, numInterBufs, &bufferInterArray);
-		if (unlikely(CPA_STATUS_SUCCESS != status))
-		{
-			printk(KERN_CRIT LOG_PREFIX "failed to start instance with %d buffers of %d (+%d metasize) (status=%d)\n",
-					numInterBufs, bufSize, buffMetaSize, status);
-		}
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		instanceStarted = B_TRUE;
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = isInstancePolled(dcInstHandle, &polled);
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		/* Register callback function for the instance */
-		if (polled)
-		{
-			status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_polled);
-		}
-		else
-		{
-			status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_interrupt);
-		}
-	}
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
@@ -1899,7 +2001,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 		 * to select static Huffman encoding over dynamic Huffman as
 		 * the static encoding will provide better compressibility.
 		 */
-		if (pCap->autoSelectBestHuffmanTree)
+	    if (instances[instNum].autoSelectBestHuffmanTree)
 		{
 			pSd->autoSelectBestHuffmanTree = CPA_TRUE;
 		}
@@ -1946,7 +2048,9 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 		CpaStatus sessionStatus = CPA_STATUS_SUCCESS;
 
 		/* Perform Compression operation */
-		ret = (*func)(dcInstHandle, sessionHdl, polled, src, src_len, dest, dest_len, c_len);
+	    ret = (*func)(instances[instNum].dcInstHandle, sessionHdl, 
+			  instances[instNum].polled, instances[instNum].contig,
+			  src, src_len, dest, dest_len, c_len);
 
 		sessionStatus = cpaDcDpRemoveSession(dcInstHandle, sessionHdl);
 
@@ -1962,63 +2066,16 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 	 * Free up memory, stop the instance, etc.
 	 */
 
-	if (likely(instanceStarted))
-	{
-		cpaDcStopInstance(dcInstHandle);
-	}
-
-	/* free temporary allocations */
-	VIRT_FREE(pSd);
-	VIRT_FREE(pCap);
-
 	/* Free session Context */
 	DESTROY_SESSION(sessionHdl);
-
-	/* Free intermediate buffers */
-	if (likely(bufferInterArray != NULL))
-	{
-		for (bufferNum = 0; bufferNum < numInterBuffLists; bufferNum++)
-		{
-			if (likely(bufferInterArray[bufferNum].pBuffers != NULL))
-			{
-				if (contig)
-				{
-					HIGHMEM_CONTIG_FREE(bufferAllocations[bufferNum]);
-				}
-				else
-				{
-					VIRT_FREE(bufferInterArray[bufferNum].pBuffers->pData);
-				}
-			}
-			// PHYS_CONTIG_FREE(bufferInterArray[bufferNum].pBuffers);
-			HIGHMEM_CONTIG_FREE(flatBufferAllocations[bufferNum]);
-			HIGHMEM_CONTIG_FREE(metadataAllocations[bufferNum]);
-		}
-		// PHYS_CONTIG_FREE(bufferInterArray);
-		HIGHMEM_CONTIG_FREE(bufferInterArrayAllocation);
-	}
-
-	if (contig)
-	{
-		VIRT_FREE(bufferAllocations);
-	}
-
-	VIRT_FREE(metadataAllocations);
-	VIRT_FREE(flatBufferAllocations);
-
+	/* free temporary allocations */
+	VIRT_FREE(pSd);
+	
 	/* to have more free memory, unlock instance after cleaning */
 
 	unlock_instance(instNum);
 
 	return ret;
-
-/* go here afer received instance */
-failedAfterInit:
-
-	// can be initialized
-	VIRT_FREE(pCap);
-
-	unlock_instance(instNum);
 
 /* go here before any initializations */
 failed:

@@ -63,6 +63,15 @@ QAT software that can apply for requests of a certain size.
 
 #define LOG_PREFIX "ZFS-QAT/cy: "
 
+typedef struct qat_instance_info
+{
+	CpaInstanceHandle cyInstHandle;
+	CpaBoolean instanceStarted;
+	CpaBoolean instanceReady;
+	CpaBoolean polled;
+
+} qat_instance_info_t;
+
 /*
  * Used for qat kstat.
  */
@@ -181,6 +190,8 @@ int zfs_qat_disable_sha2_256 = 0;
 #if QAT_DIGEST_ENABLE_SHA3_256
 int zfs_qat_disable_sha3_256 = 0;
 #endif
+
+static qat_instance_info_t *instances = NULL;
 
 static kstat_t *qat_ksp = NULL;
 static struct kmem_cache *opCache = NULL;
@@ -454,6 +465,171 @@ _destroy_buffer(Cpa8U **ptr)
 #define MAX_DIGEST_LENGTH SHA2_256_DIGEST_LENGTH
 #endif
 
+static CpaStatus
+isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
+{
+    CpaInstanceInfo2 *instanceInfo = NULL;
+    CpaStatus status = CPA_STATUS_SUCCESS;
+
+    if (likely(CPA_STATUS_SUCCESS == status))
+    {
+	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
+    }
+
+    if (likely(CPA_STATUS_SUCCESS == status))
+    {
+	// get type of instance, polled (1) or interrupt (0)
+	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
+    }
+
+    if (likely(CPA_STATUS_SUCCESS == status))
+    {
+	*polled = instanceInfo->isPolled;
+    }
+
+    VIRT_FREE(instanceInfo);
+
+    return status;
+}
+
+// warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name
+static CpaStatus
+getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
+{
+    CpaInstanceInfo2 *instanceInfo = NULL;
+    CpaStatus status = CPA_STATUS_SUCCESS;
+
+    if (likely(CPA_STATUS_SUCCESS == status))
+    {
+	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
+    }
+
+    if (likely(CPA_STATUS_SUCCESS == status))
+    {
+        // get name of instance
+	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
+    }
+
+    if (likely(CPA_STATUS_SUCCESS == status))
+    {
+	strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
+    }
+
+    VIRT_FREE(instanceInfo);
+
+    return status;
+}
+
+static void
+qat_cy_callback_interrupt(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean verifyResult)
+{
+    if (likely(pOpData->pCallbackTag != NULL))
+    {
+        complete((struct completion *)pOpData->pCallbackTag);
+    }
+}
+
+static void
+qat_cy_callback_polled(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean verifyResult)
+{
+    pOpData->pCallbackTag = (void *)1;
+}
+
+static CpaStatus
+releaseInstanceInfo(qat_instance_info_t *info)
+{
+    CpaStatus status = CPA_STATUS_SUCCESS;
+
+    /* Clean up */
+
+    if (likely(info->instanceStarted))
+    {
+    	cpaCyStopInstance(info->cyInstHandle);
+	info->instanceStarted = CPA_FALSE;
+	info->instanceReady = CPA_FALSE;
+    }
+
+    return (status);
+}
+
+static CpaStatus
+getReadyInstanceInfo(CpaInstanceHandle cyInstHandle, qat_instance_info_t *info)
+{
+    CpaStatus status = CPA_STATUS_FAIL;
+    // CpaCyCapabilitiesInfo cap = {0};
+
+    /* check if instance is already started and ready */
+    if (info->instanceReady)
+    {
+	// instance already started and ready
+	// just return
+	status = CPA_STATUS_SUCCESS;
+    }
+    else
+    {
+    	/* Start Cryptographic instance */
+	status = cpaCyStartInstance(cyInstHandle);
+    	
+    	if (likely(CPA_STATUS_SUCCESS == status))
+    	{
+		info->cyInstHandle = cyInstHandle;
+		info->instanceStarted = CPA_TRUE;
+    	}
+/*
+#if 0
+    if (CPA_STATUS_SUCCESS == status)
+    {
+	status = cpaCyQueryCapabilities(cyInstHandle, &cap);
+	if (CPA_STATUS_SUCCESS != status)
+	{
+		printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities (status=%d)\n", status);
+	}
+    }
+
+    if (CPA_STATUS_SUCCESS == status) {
+	if (!cap.symDpSupported)
+	{
+	    printk(KERN_CRIT LOG_PREFIX "unsupported functionality\n");
+    	    status = CPA_STATUS_FAIL;
+	}
+    }
+#endif
+*/
+    	if (likely(CPA_STATUS_SUCCESS == status))
+    	{
+        	/*
+         	* Set the address translation function for the instance
+         	*/
+        	status = cpaCySetAddressTranslation(cyInstHandle, (void *)virt_to_phys);
+    	}
+
+    	if (likely(CPA_STATUS_SUCCESS == status))
+    	{
+		status = isInstancePolled(cyInstHandle, &info->polled);
+    	}
+
+    	if (likely(CPA_STATUS_SUCCESS == status))
+    	{
+        	/* Register callback function for the instance depending on polling/interrupt */
+        	if (info->polled)
+		{
+	    		status = cpaCySymDpRegCbFunc(cyInstHandle, qat_cy_callback_polled);
+		}
+		else
+		{
+	    		status = cpaCySymDpRegCbFunc(cyInstHandle, qat_cy_callback_interrupt);
+        	}
+    	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+	    info->instanceReady = CPA_TRUE;
+	}
+    }
+
+    return (status);
+}
+
 static void
 cacheConstructor(void *pOpData)
 {
@@ -464,6 +640,22 @@ int
 qat_digest_init(void)
 {
 	Cpa16U numInstances = 0;
+	CpaStatus status = CPA_STATUS_SUCCESS;
+
+	int qatInfoSize = MAX_INSTANCES * sizeof(qat_instance_info_t);
+
+	status = VIRT_ALLOC(&instances, qatInfoSize);
+	if (unlikely(CPA_STATUS_SUCCESS != status))
+	{
+		printk(KERN_CRIT LOG_PREFIX "failed to allocate instance cache storage (%d)\n",
+		       qatInfoSize);
+		goto err;
+	}
+	else
+	{
+		// clean memory
+		memset(instances, 0, qatInfoSize);
+	}
 
 	opCache = kmem_cache_create("CpaCySymDpOpData",
 		sizeof(CpaCySymDpOpData),
@@ -532,8 +724,18 @@ qat_digest_init(void)
 void
 qat_digest_fini(void)
 {
-
 	unsigned long flags;
+	int i;
+
+	if (likely(instances != NULL))
+	{
+		for (i = 0; i < MAX_INSTANCES; i++)
+		{
+			releaseInstanceInfo(&instances[i]);
+		}
+
+		VIRT_FREE(instances);
+	}
 
 	if (likely(NULL != qat_ksp))
 	{
@@ -623,21 +825,6 @@ register_error_status(const CpaStatus status)
     }
 }
 
-static void
-qat_cy_callback_interrupt(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean verifyResult)
-{
-    if (likely(pOpData->pCallbackTag != NULL))
-    {
-        complete((struct completion *)pOpData->pCallbackTag);
-    }
-}
-
-static void
-qat_cy_callback_polled(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean verifyResult)
-{
-    pOpData->pCallbackTag = (void *)1;
-}
-
 static inline uint32_t
 getTimeoutMs(const int dataSize, const int maxSize)
 {
@@ -646,62 +833,7 @@ getTimeoutMs(const int dataSize, const int maxSize)
 }
 
 static CpaStatus
-isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
-{
-    CpaInstanceInfo2 *instanceInfo = NULL;
-    CpaStatus status = CPA_STATUS_SUCCESS;
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	// get type of instance, polled (1) or interrupt (0)
-	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	*polled = instanceInfo->isPolled;
-    }
-
-    VIRT_FREE(instanceInfo);
-
-    return status;
-}
-
-// warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name
-static CpaStatus
-getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
-{
-    CpaInstanceInfo2 *instanceInfo = NULL;
-    CpaStatus status = CPA_STATUS_SUCCESS;
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-        // get name of instance
-	status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
-    }
-
-    VIRT_FREE(instanceInfo);
-
-    return status;
-}
-
-static CpaStatus
-waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs)
+waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *pOpData, const CpaBoolean polled, const unsigned long timeoutMs)
 {
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa8U *instanceName = NULL;
@@ -979,7 +1111,7 @@ registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, co
 }
 
 static qat_digest_status_t
-performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx sessionCtx, const boolean_t polled,
+performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx sessionCtx, const CpaBoolean polled,
     const CpaCySymHashAlgorithm algo, const uint8_t *src, const int src_len, zio_cksum_t *dest)
 {
      qat_digest_status_t ret = QAT_DIGEST_FAIL;
@@ -1105,101 +1237,44 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 
 
 static qat_digest_status_t
-qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymSessionCtx, const boolean_t, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
+qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymSessionCtx, const CpaBoolean, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
     const CpaCySymHashAlgorithm algo, const uint8_t* src, const int src_len, zio_cksum_t *dest)
 {
     qat_digest_status_t ret = QAT_DIGEST_FAIL;
-
     CpaStatus status = CPA_STATUS_FAIL;
-    CpaCySymSessionCtx sessionCtx = NULL;
-    Cpa32U sessionCtxSize = 0;
     CpaInstanceHandle cyInstHandle = NULL;
-    CpaCySymSessionSetupData *pSessionSetupData = NULL;
-    // CpaCyCapabilitiesInfo cap = {0};
-
-    boolean_t polled = B_FALSE;
-    Cpa32U digestLength = 0;
     int instNum;
-    boolean_t instanceStarted = B_FALSE;
+    CpaCySymSessionSetupData *pSessionSetupData = NULL;
+    Cpa32U digestLength = 0;
+    Cpa32U sessionCtxSize;
+    CpaCySymSessionCtx sessionCtx = NULL;
 
+    /* receive locked instance, don't forget to unlock it when ready */
     status = getInstance(&cyInstHandle, &instNum);
-    if (CPA_STATUS_SUCCESS != status || cyInstHandle == NULL)
+    if (CPA_STATUS_SUCCESS != status || NULL == cyInstHandle)
     {
         goto failed;
     }
 
-    /* drop counter after successfull init */
+    /* drop failure counter after successfull init */
     atomic_set(&numInitFailed, 0);
 
-    /* Start Cryptographic instance */
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = cpaCyStartInstance(cyInstHandle);
-    }
+    /* initialize and start instance */
+    status = getReadyInstanceInfo(cyInstHandle, &instances[instNum]);
 
     if (likely(CPA_STATUS_SUCCESS == status))
     {
-	instanceStarted = B_TRUE;
-    }
-
-#if 0
-    if (CPA_STATUS_SUCCESS == status)
-    {
-	status = cpaCyQueryCapabilities(cyInstHandle, &cap);
-	if (CPA_STATUS_SUCCESS != status)
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities (status=%d)\n", status);
-	}
-    }
-
-    if (CPA_STATUS_SUCCESS == status) {
-	if (!cap.symDpSupported)
-	{
-	    printk(KERN_CRIT LOG_PREFIX "unsupported functionality\n");
-    	    status = CPA_STATUS_FAIL;
-	}
-    }
-#endif
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-        /*
-         * Set the address translation function for the instance
-         */
-        status = cpaCySetAddressTranslation(cyInstHandle, (void *)virt_to_phys);
+        status = getDigestLength(algo, &digestLength);
     }
 
     if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = isInstancePolled(cyInstHandle, &polled);
+    {   
+        status = VIRT_ALLOC(&pSessionSetupData, sizeof(CpaCySymSessionSetupData));
     }
 
     if (likely(CPA_STATUS_SUCCESS == status))
-    {
-        /* Register callback function for the instance depending on polling/interrupt */
-        if (polled)
-	{
-	    status = cpaCySymDpRegCbFunc(cyInstHandle, qat_cy_callback_polled);
-	}
-	else
-	{
-	    status = cpaCySymDpRegCbFunc(cyInstHandle, qat_cy_callback_interrupt);
-        }
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = getDigestLength(algo, &digestLength);
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = VIRT_ALLOC(&pSessionSetupData, sizeof(CpaCySymSessionSetupData));
-    }
-
-    if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	memset(pSessionSetupData, 0, sizeof(CpaCySymSessionSetupData));
+    {   
+        memset(pSessionSetupData, 0, sizeof(CpaCySymSessionSetupData));
 
         /* populate symmetric session data structure */
         pSessionSetupData->sessionPriority = CPA_CY_PRIORITY_NORMAL;
@@ -1215,33 +1290,38 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
         pSessionSetupData->verifyDigest = CPA_FALSE;
 
         /* Determine size of session context to allocate */
-        status = cpaCySymDpSessionCtxGetSize(
+        status = cpaCySymSessionCtxGetDynamicSize(
             cyInstHandle, pSessionSetupData, &sessionCtxSize);
     }
 
     if (likely(CPA_STATUS_SUCCESS == status))
-    {
-	status = getReadySessionCache(sessionCtxSize);
+    {   
+        status = getReadySessionCache(sessionCtxSize);
     }
 
     if (likely(CPA_STATUS_SUCCESS == status))
-    {
+    {   
         /* Allocate session context */
         status = CREATE_SESSION(&sessionCtx);
     }
 
     if (likely(CPA_STATUS_SUCCESS == status))
-    {
+    {   
         /* Initialize the session */
         status = cpaCySymDpInitSession(cyInstHandle, pSessionSetupData, sessionCtx);
     }
 
-    if (likely(CPA_STATUS_SUCCESS == status))
+    if (CPA_STATUS_SUCCESS == status)
     {
-        CpaStatus sessionStatus = CPA_STATUS_SUCCESS;
+    	ret = (*func)(instances[instNum].cyInstHandle, 
+		      	sessionCtx,
+			instances[instNum].polled,
+			algo, src, src_len, dest);
+    }
 
-        /* Perform hash operation */
-        ret = (*func)(cyInstHandle, sessionCtx, polled, algo, src, src_len, dest);
+    if (CPA_STATUS_SUCCESS == status)
+    {
+	CpaStatus sessionStatus = CPA_STATUS_SUCCESS;
 
         /* Remove the session - session init has already succeeded */
 
@@ -1259,16 +1339,11 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
         }
     }
 
-    /* Clean up */
-
-    if (likely(instanceStarted))
-    {
-    	cpaCyStopInstance(cyInstHandle);
-    }
+    /* Free session setup */
+    VIRT_FREE(pSessionSetupData);
 
     /* Free session Context */
     DESTROY_SESSION(sessionCtx);
-    VIRT_FREE(pSessionSetupData);
 
     /* to get more free memory unlock instance after cleaning */
     unlock_instance(instNum);
