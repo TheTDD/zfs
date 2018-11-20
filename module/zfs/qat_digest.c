@@ -226,17 +226,17 @@ getNextInstance(Cpa16U num_inst)
     return (inst);
 }
 
-static inline boolean_t
+static inline CpaBoolean
 check_and_lock(Cpa16U i)
 {
-    boolean_t ret = B_FALSE;
+    CpaBoolean ret = CPA_FALSE;
     unsigned long flags;
 
     spin_lock_irqsave(&instance_storage_lock, flags);
     if (likely(0 == atomic_read(&instance_lock[i])))
     {
 	atomic_inc(&instance_lock[i]);
-	ret = B_TRUE;
+	ret = CPA_TRUE;
     }
     spin_unlock_irqrestore(&instance_storage_lock, flags);
 
@@ -646,7 +646,7 @@ getTimeoutMs(const int dataSize, const int maxSize)
 }
 
 static CpaStatus
-isInstancePolled(const CpaInstanceHandle dcInstHandle, boolean_t *polled)
+isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 {
     CpaInstanceInfo2 *instanceInfo = NULL;
     CpaStatus status = CPA_STATUS_SUCCESS;
@@ -701,7 +701,7 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 }
 
 static CpaStatus
-waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *pOpData, const boolean_t polled, const unsigned long timeoutMs)
+waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *pOpData, const CpaBoolean polled, const unsigned long timeoutMs)
 {
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa8U *instanceName = NULL;
@@ -785,7 +785,7 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
     CpaStatus status = CPA_STATUS_SUCCESS;
     Cpa16U num_inst = 0;
     int inst = 0;
-    boolean_t instanceFound = B_FALSE;
+    CpaBoolean instanceFound = CPA_FALSE;
 
     CpaInstanceHandle *handles = NULL;
 
@@ -841,7 +841,7 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
 
 	if (check_and_lock(inst))
 	{
-	    instanceFound = B_TRUE;
+	    instanceFound = CPA_TRUE;
 	    break;
 	}
     }
@@ -979,7 +979,7 @@ registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, co
 }
 
 static qat_digest_status_t
-performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx sessionCtx, const boolean_t polled,
+performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx sessionCtx, const CpaBoolean polled,
     const CpaCySymHashAlgorithm algo, const uint8_t *src, const int src_len, zio_cksum_t *dest)
 {
      qat_digest_status_t ret = QAT_DIGEST_FAIL;
@@ -1105,7 +1105,7 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 
 
 static qat_digest_status_t
-qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymSessionCtx, const boolean_t, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
+qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymSessionCtx, const CpaBoolean, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
     const CpaCySymHashAlgorithm algo, const uint8_t* src, const int src_len, zio_cksum_t *dest)
 {
     qat_digest_status_t ret = QAT_DIGEST_FAIL;
@@ -1117,10 +1117,10 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
     CpaCySymSessionSetupData *pSessionSetupData = NULL;
     // CpaCyCapabilitiesInfo cap = {0};
 
-    boolean_t polled = B_FALSE;
+    CpaBoolean polled = CPA_FALSE;
     Cpa32U digestLength = 0;
     int instNum;
-    boolean_t instanceStarted = B_FALSE;
+    CpaBoolean instanceStarted = CPA_FALSE;
 
     status = getInstance(&cyInstHandle, &instNum);
     if (CPA_STATUS_SUCCESS != status || cyInstHandle == NULL)
@@ -1139,7 +1139,7 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 
     if (likely(CPA_STATUS_SUCCESS == status))
     {
-	instanceStarted = B_TRUE;
+	instanceStarted = CPA_TRUE;
     }
 
 #if 0
