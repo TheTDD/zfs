@@ -294,7 +294,6 @@ check_and_lock(Cpa16U instanceNr)
 		atomic_inc(&instance_lock[instanceNr]);
 		ret = CPA_TRUE;
 	}
-
 	spin_unlock_irqrestore(&instance_storage_lock, flags);
 
 	return (ret);
@@ -559,7 +558,6 @@ _destroy_flatbuffer(CpaFlatBuffer **ptr)
 		*ptr = NULL;
 	}
 }
-
 
 /*******************************************************
  * CpaBufferList (static cache)
@@ -1237,13 +1235,10 @@ getTimeoutMs(const int dataSize, const int maxSize)
 static CpaStatus
 requiresPhysicallyContiguousMemory(const CpaInstanceHandle dcInstHandle, CpaBoolean *contig)
 {
-	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaStatus status;
 	CpaInstanceInfo2 *instanceInfo = NULL;
 
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
-	}
+	status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
@@ -1264,13 +1259,10 @@ requiresPhysicallyContiguousMemory(const CpaInstanceHandle dcInstHandle, CpaBool
 static CpaStatus
 isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 {
-	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaStatus status;
 	CpaInstanceInfo2 *instanceInfo = NULL;
 
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
-	}
+	status = VIRT_ALLOC(&instanceInfo,sizeof(CpaInstanceInfo2));
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
@@ -1292,13 +1284,10 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 static CpaStatus
 getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 {
-	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaStatus status;
 	CpaInstanceInfo2 *instanceInfo = NULL;
 
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
-	}
+	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
@@ -1322,7 +1311,7 @@ waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaDcDpOpData *pOp
 	CpaStatus status = CPA_STATUS_SUCCESS;
 	Cpa8U *instanceName = NULL;
 
-	if (polled)
+	if (likely(polled))
 	{
 		/* Poll for responses */
 		const unsigned long started = jiffies;
@@ -1399,7 +1388,7 @@ static inline CpaStatus
 getInstance(CpaInstanceHandle *instance, int *instanceNum)
 {
 
-	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaStatus status;
 	Cpa16U num_inst = 0;
 	int inst = 0;
 	CpaBoolean instanceFound = CPA_FALSE;
@@ -1421,7 +1410,7 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
 	else
 	{
 		/* return success but no instances configured */
-		if (num_inst == 0)
+		if (unlikely(num_inst == 0))
 		{
 			/* show message once in a minute */
 			if (jiffies_to_msecs(jiffies - atomic_long_read(&getInstanceMessageShown)) > 60L * 1000L)
@@ -1433,7 +1422,7 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
 		}
 	}
 
-	if (num_inst > MAX_INSTANCES)
+	if (unlikely(num_inst > MAX_INSTANCES))
 	{
 		num_inst = MAX_INSTANCES;
 	}
@@ -1466,7 +1455,6 @@ getInstance(CpaInstanceHandle *instance, int *instanceNum)
 
 	if (unlikely(!instanceFound))
 	{
-
         	if (jiffies_to_msecs(jiffies - atomic_long_read(&noInstanceMessageShown)) > 60L * 1000L)
         	{
 			printk(KERN_WARNING LOG_PREFIX "failed to find free DC instance ouf of %d, consider to increase NumberDcInstances in [KERNEL_QAT] section\n", num_inst);
@@ -1489,7 +1477,7 @@ done:
 }
 
 /*
- * This function performs a decompression operation.
+ * This function performs a compression operation.
  */
 static qat_compress_status_t
 compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle sessionHdl,
@@ -1503,8 +1491,13 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	struct completion *pComplete = NULL;
 	unsigned long timeout = 0;
 
-	CpaFlatBuffer srcBuf = {0};
-	CpaFlatBuffer destBuf = {0};
+	/* free space on stack by allocation of structures */
+	CpaFlatBuffer *srcBuf = NULL;
+	CpaFlatBuffer *destBuf = NULL;
+	CpaFlatBuffer *headerBuf = NULL;
+	CpaFlatBuffer *footerBuf = NULL;
+
+	CpaDcDpOpData *pOpData = NULL;
 
 	/*
 	 * recovery from errors is more expensive then successful compression
@@ -1513,10 +1506,6 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	 */
 	Cpa32U bufferSize = ceil( 9 * src_len, 8 ) + 55;
 
-	CpaDcDpOpData *pOpData = NULL;
-
-	CpaFlatBuffer headerBuf = {0};
-	CpaFlatBuffer footerBuf = {0};
 	Cpa32U hdr_sz = 0;
 	Cpa32U foot_sz = 0;
 	Cpa32U compressed_sz = 0;
@@ -1528,10 +1517,25 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
+		status = CREATE_FLATBUFFER(&srcBuf);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = CREATE_FLATBUFFER(&destBuf);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = CREATE_FLATBUFFER(&headerBuf);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
 		status = requiresPhysicallyContiguousMemory(dcInstHandle, &contig);
 	}
 
-	if (CPA_STATUS_SUCCESS == status && !polled)
+	if (unlikely(CPA_STATUS_SUCCESS == status && !polled))
 	{
 		status = VIRT_ALLOC(&pComplete, sizeof(struct completion));
 	}
@@ -1540,8 +1544,8 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		// status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len, DEFAULT_ALIGN_ALLOC);
-	    	status = CREATE_BUFFER(&srcBuf.pData);
-		srcBuf.dataLenInBytes = src_len;
+	    	status = CREATE_BUFFER(&srcBuf->pData);
+		srcBuf->dataLenInBytes = src_len;
 		if (unlikely(CPA_STATUS_SUCCESS != status))
         	{
                 	printk(KERN_WARNING LOG_PREFIX "compression failed to allocate %d bytes for input buffer\n",
@@ -1553,11 +1557,11 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	/* allocate destination buffer */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		memcpy(srcBuf.pData, src, src_len);
+		memcpy(srcBuf->pData, src, src_len);
 
 		// status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, DEFAULT_ALIGN_ALLOC);
-	    	status = CREATE_BUFFER(&destBuf.pData);
-		destBuf.dataLenInBytes = bufferSize;
+	    	status = CREATE_BUFFER(&destBuf->pData);
+		destBuf->dataLenInBytes = bufferSize;
                 if (unlikely(CPA_STATUS_SUCCESS != status))
                 {
                         printk(KERN_WARNING LOG_PREFIX "compression failed to allocate %d bytes for output buffer\n",
@@ -1571,25 +1575,25 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	{
 		if (contig)
 		{
-			status = CREATE_ZLIB_BUF(&headerBuf.pData);
+			status = CREATE_ZLIB_BUF(&headerBuf->pData);
 		}
 		else
 		{
-			status = VIRT_ALLOC(&headerBuf.pData, ZLIB_HEAD_SZ);
+			status = VIRT_ALLOC(&headerBuf->pData, ZLIB_HEAD_SZ);
 		}
-		headerBuf.dataLenInBytes = ZLIB_HEAD_SZ;
+		headerBuf->dataLenInBytes = ZLIB_HEAD_SZ;
 	}
 
 	/* generate header */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		// generate header into own buffer
-		status = cpaDcGenerateHeader(sessionHdl, &headerBuf, &hdr_sz);
+		status = cpaDcGenerateHeader(sessionHdl, headerBuf, &hdr_sz);
 		if (unlikely(CPA_STATUS_SUCCESS != status))
 		{
 			QAT_STAT_BUMP(err_gen_header);
 			printk(KERN_CRIT LOG_PREFIX "failed to generate header into buffer of size %d (status=%d)\n",
-				headerBuf.dataLenInBytes, status);
+				headerBuf->dataLenInBytes, status);
 		}
 	}
 
@@ -1615,15 +1619,15 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		pOpData->bufferLenForData = bufferSize;
 		pOpData->dcInstance = dcInstHandle;
 		pOpData->pSessionHandle = sessionHdl;
-		pOpData->srcBuffer = virt_to_phys(srcBuf.pData);
-		pOpData->srcBufferLen = srcBuf.dataLenInBytes;
-		pOpData->destBuffer = virt_to_phys(destBuf.pData);
-		pOpData->destBufferLen = destBuf.dataLenInBytes;
+		pOpData->srcBuffer = virt_to_phys(srcBuf->pData);
+		pOpData->srcBufferLen = srcBuf->dataLenInBytes;
+		pOpData->destBuffer = virt_to_phys(destBuf->pData);
+		pOpData->destBufferLen = destBuf->dataLenInBytes;
 		pOpData->sessDirection = CPA_DC_DIR_COMPRESS;
 		INIT_DC_DP_CNV_OPDATA(pOpData);
 		pOpData->thisPhys = virt_to_phys(pOpData);
 
-		if (polled)
+		if (likely(polled))
 		{
 			pOpData->pCallbackTag = (void *)0;
 		}
@@ -1708,30 +1712,35 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		}
 	}
 
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = CREATE_FLATBUFFER(&footerBuf);
+	}
+
 	/* allocate buffer for footer */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		if (contig)
 		{
-			status = CREATE_ZLIB_BUF(&footerBuf.pData);
+			status = CREATE_ZLIB_BUF(&footerBuf->pData);
 		}
 		else
 		{
-			status = VIRT_ALLOC(&footerBuf.pData, ZLIB_FOOT_SZ);
+			status = VIRT_ALLOC(&footerBuf->pData, ZLIB_FOOT_SZ);
 		}
-		footerBuf.dataLenInBytes = ZLIB_FOOT_SZ;
+		footerBuf->dataLenInBytes = ZLIB_FOOT_SZ;
 	}
 
 	// generate footer
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		/* generate footer into own buffer but updates pOpData->results */
-		status = cpaDcGenerateFooter(sessionHdl, &footerBuf, &pOpData->results);
+		status = cpaDcGenerateFooter(sessionHdl, footerBuf, &pOpData->results);
 		if (unlikely(CPA_STATUS_SUCCESS != status))
 		{
 			QAT_STAT_BUMP(err_gen_footer);
 			printk(KERN_CRIT LOG_PREFIX "failed to generate footer into buffer of size %d (status=%d)\n",
-					footerBuf.dataLenInBytes, status);
+					footerBuf->dataLenInBytes, status);
 		}
 	}
 
@@ -1754,9 +1763,9 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		} else {
 
 			/* copy header+output+footer into destination */
-			memcpy(&dest[0], 	  			headerBuf.pData, 	hdr_sz);
-			memcpy(&dest[hdr_sz], 			destBuf.pData, 		compressed_sz);
-			memcpy(&dest[hdr_sz + compressed_sz],       footerBuf.pData,        foot_sz);
+			memcpy(&dest[0], 	  		headerBuf->pData, 	hdr_sz);
+			memcpy(&dest[hdr_sz], 			destBuf->pData, 	compressed_sz);
+			memcpy(&dest[hdr_sz + compressed_sz],   footerBuf->pData,       foot_sz);
 
 			/* save size of compressed data */
 			*c_len = hdr_sz + compressed_sz + foot_sz;
@@ -1777,28 +1786,49 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 	 * Free the memory!
 	 */
 
+	VIRT_FREE(pComplete);
 	DESTROY_OPDATA(pOpData);
 
 	// PHYS_CONTIG_FREE(srcBuf.pData);
 	// PHYS_CONTIG_FREE(destBuf.pData);
-	DESTROY_BUFFER(srcBuf.pData);
-	DESTROY_BUFFER(destBuf.pData);
-
-	if (contig)
+	// PHYS_CONTIG_FREE(headerBuf.pData);
+	// PHYS_CONTIG_FREE(footerBuf.pData);
+	if (likely(srcBuf != NULL))
 	{
-		DESTROY_ZLIB_BUF(headerBuf.pData);
-		DESTROY_ZLIB_BUF(footerBuf.pData);
+		DESTROY_BUFFER(srcBuf->pData);
+		DESTROY_FLATBUFFER(srcBuf);
 	}
-	else
+	if (likely(destBuf != NULL))
 	{
-		VIRT_FREE(headerBuf.pData);
-		VIRT_FREE(footerBuf.pData);
+		DESTROY_BUFFER(destBuf->pData);
+		DESTROY_FLATBUFFER(destBuf);
+	}
+	if (likely(headerBuf != NULL))
+	{
+		if (contig)
+		{
+			DESTROY_ZLIB_BUF(headerBuf->pData);
+		}
+		else
+		{
+			VIRT_FREE(headerBuf->pData);
+		}
+		DESTROY_FLATBUFFER(headerBuf);
+	}
+	if (likely(footerBuf != NULL))
+	{
+		if (contig)
+		{
+			DESTROY_ZLIB_BUF(footerBuf->pData);
+		}
+		else
+		{
+			VIRT_FREE(footerBuf->pData);
+		}
+		DESTROY_FLATBUFFER(footerBuf);
 	}
 
-	VIRT_FREE(pComplete);
-
-	return ret;
-
+	return (ret);
 }
 
 /*
@@ -1822,14 +1852,26 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	 * QATE-30865
 	 */
 	const Cpa32U bufferSize = max(258L, (long)dest_len);
-	CpaFlatBuffer srcBuf = {0};
-	CpaFlatBuffer destBuf = {0};
+
+	/* less data on stack */
+	CpaFlatBuffer *srcBuf = NULL;
+	CpaFlatBuffer *destBuf = NULL;
 	CpaDcDpOpData *pOpData = NULL;
 
 	QAT_STAT_BUMP(decomp_requests);
 	QAT_STAT_INCR(decomp_total_in_bytes, src_len);
 
-	if (CPA_STATUS_SUCCESS == status && !polled)
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = CREATE_FLATBUFFER(&srcBuf);
+	}
+
+	if (likely(CPA_STATUS_SUCCESS == status))
+	{
+		status = CREATE_FLATBUFFER(&destBuf);
+	}
+
+	if (unlikely(CPA_STATUS_SUCCESS == status && !polled))
 	{
 		status = VIRT_ALLOC(&pComplete, sizeof(struct completion));
 	}
@@ -1838,8 +1880,8 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		// status = PHYS_CONTIG_ALLOC_ALIGNED(&srcBuf.pData, src_len - ZLIB_HEAD_SZ, DEFAULT_ALIGN_ALLOC);
-		status = CREATE_BUFFER(&srcBuf.pData);
-		srcBuf.dataLenInBytes = src_len - ZLIB_HEAD_SZ;
+		status = CREATE_BUFFER(&srcBuf->pData);
+		srcBuf->dataLenInBytes = src_len - ZLIB_HEAD_SZ;
                 if (unlikely(CPA_STATUS_SUCCESS != status))
                 {
                         printk(KERN_WARNING LOG_PREFIX "decompression failed to allocate %d bytes for input buffer\n",
@@ -1851,11 +1893,11 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	/* allocate destination buffer */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		memcpy(srcBuf.pData, &src[ZLIB_HEAD_SZ], src_len - ZLIB_HEAD_SZ);
+		memcpy(srcBuf->pData, &src[ZLIB_HEAD_SZ], src_len - ZLIB_HEAD_SZ);
 
 		// status = PHYS_CONTIG_ALLOC_ALIGNED(&destBuf.pData, bufferSize, DEFAULT_ALIGN_ALLOC);
-	    	status = CREATE_BUFFER(&destBuf.pData);
-		destBuf.dataLenInBytes = bufferSize;
+	    	status = CREATE_BUFFER(&destBuf->pData);
+		destBuf->dataLenInBytes = bufferSize;
                 if (unlikely(CPA_STATUS_SUCCESS != status))
                 {
                         printk(KERN_WARNING LOG_PREFIX "decompression failed to allocate %d bytes for output buffer\n",
@@ -1887,15 +1929,15 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 		pOpData->bufferLenForData = bufferSize;
 		pOpData->dcInstance = dcInstHandle;
 		pOpData->pSessionHandle = sessionHdl;
-		pOpData->srcBuffer = virt_to_phys(srcBuf.pData);
-		pOpData->srcBufferLen = srcBuf.dataLenInBytes;
-		pOpData->destBuffer = virt_to_phys(destBuf.pData);
-		pOpData->destBufferLen = destBuf.dataLenInBytes;
+		pOpData->srcBuffer = virt_to_phys(srcBuf->pData);
+		pOpData->srcBufferLen = srcBuf->dataLenInBytes;
+		pOpData->destBuffer = virt_to_phys(destBuf->pData);
+		pOpData->destBufferLen = destBuf->dataLenInBytes;
 		pOpData->sessDirection = CPA_DC_DIR_DECOMPRESS;
 		INIT_DC_DP_CNV_OPDATA(pOpData);
 		pOpData->thisPhys = virt_to_phys(pOpData);
 
-		if (polled)
+		if (likely(polled))
 		{
 			pOpData->pCallbackTag = (void *)0;
 		}
@@ -1962,7 +2004,7 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 				else
 				{
 					/* copy data from output buffer to destination */
-					memcpy(dest, destBuf.pData, pOpData->results.produced);
+					memcpy(dest, destBuf->pData, pOpData->results.produced);
 
 					// save result size
 					*c_len = pOpData->results.produced;
@@ -1985,13 +2027,21 @@ decompPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle s
 	 * Free the memory!
 	 */
 	DESTROY_OPDATA(pOpData);
+	VIRT_FREE(pComplete);
 
 	// PHYS_CONTIG_FREE(srcBuf.pData);
 	// PHYS_CONTIG_FREE(destBuf.pData);
-	DESTROY_BUFFER(srcBuf.pData);
-	DESTROY_BUFFER(destBuf.pData);
+	if (likely(srcBuf != NULL))
+	{
+		DESTROY_BUFFER(srcBuf->pData);
+		DESTROY_FLATBUFFER(srcBuf);
+	}
 
-	VIRT_FREE(pComplete);
+	if (likely(destBuf != NULL))
+	{
+		DESTROY_BUFFER(destBuf->pData);
+		DESTROY_FLATBUFFER(destBuf);
+	}
 
 	return ret;
 }
@@ -2039,7 +2089,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 	CpaBoolean instanceStarted = CPA_FALSE;
 	CpaBoolean contig = CPA_TRUE;
 
-	CpaStatus status = CPA_STATUS_SUCCESS;
+	CpaStatus status;
 	CpaDcSessionHandle sessionHdl = NULL;
 	CpaInstanceHandle dcInstHandle = NULL;
 	CpaDcInstanceCapabilities *pCap = NULL;
@@ -2056,6 +2106,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
                            twice the size of the output buffer */
 	/* Reduce to PAGE_SIZE (4K) to save memory */
 	// Cpa32U bufSize = PAGE_SIZE * floor(2 * dest_len, PAGE_SIZE);
+	Cpa32U bufSize = 2 * QAT_MAX_BUF_SIZE;
 
 	/*
 	 * In this simplified version of instance discovery, we discover
@@ -2103,26 +2154,26 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		if (pCap->dynamicHuffmanBufferReq)
+		if (likely(pCap->dynamicHuffmanBufferReq))
 		{
 		 	status = cpaDcBufferListGetMetaSize(dcInstHandle, 1, &buffMetaSize);
 
-        		if (CPA_STATUS_SUCCESS == status)
+        		if (likely(CPA_STATUS_SUCCESS == status))
         		{
 			    status = cpaDcGetNumIntermediateBuffers(dcInstHandle, &numInterBuffLists);
         		}
 
-		    	if (CPA_STATUS_SUCCESS == status)
+		    	if (likely(CPA_STATUS_SUCCESS == status))
 		    	{
 			    status = getReadyMetadataCache(buffMetaSize);
 			}
 
-		    	if (CPA_STATUS_SUCCESS == status && 0 != numInterBuffLists)
+		    	if (likely(CPA_STATUS_SUCCESS == status && 0 != numInterBuffLists))
 		    	{
 			    status = getReadyBufferListPtrCache(numInterBuffLists * sizeof(CpaBufferList *));
 		    	}
 
-        		if (CPA_STATUS_SUCCESS == status && 0 != numInterBuffLists)
+        		if (likely(CPA_STATUS_SUCCESS == status && 0 != numInterBuffLists))
         		{
             			// status = PHYS_CONTIG_ALLOC(&bufferInterArray, numInterBuffLists * sizeof(CpaBufferList *));
 			    	status = CREATE_BUFFERLISTPTR(&bufferInterArray);
@@ -2130,7 +2181,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 
 		    	for (bufferNum = 0; bufferNum < numInterBuffLists; bufferNum++)
         		{
-				if (CPA_STATUS_SUCCESS == status)
+				if (likely(CPA_STATUS_SUCCESS == status))
 				{
 					// status = PHYS_CONTIG_ALLOC(&bufferInterArray[bufferNum], sizeof(CpaBufferList));
 					status = CREATE_BUFFERLIST(&bufferInterArray[bufferNum]);
@@ -2140,7 +2191,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 					break;
 				}
 
-            			if (CPA_STATUS_SUCCESS == status)
+            			if (likely(CPA_STATUS_SUCCESS == status))
             			{
                 			// status = PHYS_CONTIG_ALLOC(&bufferInterArray[bufferNum]->pPrivateMetaData, buffMetaSize);
 				    	status = CREATE_METADATA(&bufferInterArray[bufferNum]->pPrivateMetaData);
@@ -2150,7 +2201,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 					break;
 			    	}
 
-            			if (CPA_STATUS_SUCCESS == status)
+            			if (likely(CPA_STATUS_SUCCESS == status))
             			{
                 			// status = PHYS_CONTIG_ALLOC(&bufferInterArray[bufferNum]->pBuffers, sizeof(CpaFlatBuffer));
 				    	status = CREATE_FLATBUFFER(&bufferInterArray[bufferNum]->pBuffers);
@@ -2160,13 +2211,14 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 					break;
 			    	}
 
-            			if (CPA_STATUS_SUCCESS == status) {
+            			if (likely(CPA_STATUS_SUCCESS == status))
+				{
 				    /* Each buffer list should be similar in size to
 					twice the destination buffer size passed to the compress API */
                 			// status = PHYS_CONTIG_ALLOC(&bufferInterArray[bufferNum]->pBuffers->pData, bufSize);
                 			status = CREATE_INTERBUFFER(&bufferInterArray[bufferNum]->pBuffers->pData);
                 			bufferInterArray[bufferNum]->numBuffers = 1;
-                			bufferInterArray[bufferNum]->pBuffers->dataLenInBytes = 2 * QAT_MAX_BUF_SIZE;
+                			bufferInterArray[bufferNum]->pBuffers->dataLenInBytes = bufSize;
             			}
 			    	else
 			    	{
@@ -2178,7 +2230,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 			if (unlikely(CPA_STATUS_SUCCESS != status))
 			{
 				printk(KERN_ALERT LOG_PREFIX "failed allocating %d intermediate buffers of size %d and metasize %d\n",
-					numInterBuffLists, 2 * QAT_MAX_BUF_SIZE, buffMetaSize);
+					numInterBuffLists, bufSize, buffMetaSize);
 				QAT_STAT_BUMP(err_out_of_mem);
 			}
 		}
@@ -2216,7 +2268,7 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		/* Register callback function for the instance */
-		if (polled)
+		if (likely(polled))
 		{
 			status = cpaDcDpRegCbFunc(dcInstHandle, qat_dc_callback_polled);
 		}
@@ -2329,9 +2381,9 @@ qat_action( qat_compress_status_t (*func)(const CpaInstanceHandle, const CpaDcSe
 	{
 	    for (bufferNum = 0; bufferNum < numInterBuffLists; bufferNum++)
             {
-		if (bufferInterArray[bufferNum] != NULL)
+		if (likely(bufferInterArray[bufferNum] != NULL))
 		{
-			if (bufferInterArray[bufferNum]->pBuffers != NULL)
+			if (likely(bufferInterArray[bufferNum]->pBuffers != NULL))
 			{
             			// PHYS_CONTIG_FREE(bufferInterArray[bufferNum]->pBuffers->pData);
             			DESTROY_INTERBUFFER(bufferInterArray[bufferNum]->pBuffers->pData);
