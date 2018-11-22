@@ -63,7 +63,6 @@ QAT software that can apply for requests of a certain size.
 
 #define LOG_PREFIX "ZFS-QAT/cy: "
 
-
 /*
  * Used for qat kstat.
  */
@@ -229,11 +228,13 @@ static inline int
 getNextInstance(const Cpa16U num_inst)
 {
 	int inst = 0;
-	unsigned long flags;
+	// unsigned long flags;
 
-	spin_lock_irqsave(&next_instance_lock, flags);
+	// spin_lock_irqsave(&next_instance_lock, flags);
+	spin_lock(&next_instance_lock);
 	inst = atomic_inc_return(&current_instance_number) % num_inst;
-	spin_unlock_irqrestore(&next_instance_lock, flags);
+	// spin_unlock_irqrestore(&next_instance_lock, flags);
+	spin_unlock(&next_instance_lock);
 
 	return (inst);
 }
@@ -242,15 +243,17 @@ static inline CpaBoolean
 check_and_lock(const Cpa16U i)
 {
 	CpaBoolean ret = CPA_FALSE;
-	unsigned long flags;
+	// unsigned long flags;
 
-	spin_lock_irqsave(&instance_storage_lock, flags);
+	// spin_lock_irqsave(&instance_storage_lock, flags);
+	spin_lock(&instance_storage_lock);
 	if (likely(0 == atomic_read(&instance_lock[i])))
 	{
 		atomic_inc(&instance_lock[i]);
 		ret = CPA_TRUE;
 	}
-	spin_unlock_irqrestore(&instance_storage_lock, flags);
+	// spin_unlock_irqrestore(&instance_storage_lock, flags);
+	spin_unlock(&instance_storage_lock);
 
 	return (ret);
 }
@@ -258,20 +261,23 @@ check_and_lock(const Cpa16U i)
 static inline void
 unlock_instance(const Cpa16U i)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&instance_storage_lock, flags);
+	// unsigned long flags;
+	// spin_lock_irqsave(&instance_storage_lock, flags);
+	spin_lock(&instance_storage_lock);
 	atomic_dec(&instance_lock[i]);
-	spin_unlock_irqrestore(&instance_storage_lock, flags);
+	// spin_unlock_irqrestore(&instance_storage_lock, flags);
+	spin_unlock(&instance_storage_lock);
 }
 
 static inline void
 updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 {
-	unsigned long flags;
+	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	spin_lock_irqsave(&throughput_sha2_256_lock, flags);
+	// spin_lock_irqsave(&throughput_sha2_256_lock, flags);
+	spin_lock(&throughput_sha2_256_lock);
 
 	sha2_256Time = timespec_add(sha2_256Time, ts);
 	if (likely(sha2_256Time.tv_sec > 0))
@@ -280,18 +286,20 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, processed / sha2_256Time.tv_sec);
 	}
 
-	spin_unlock_irqrestore(&throughput_sha2_256_lock, flags);
+	// spin_unlock_irqrestore(&throughput_sha2_256_lock, flags);
+	spin_unlock(&throughput_sha2_256_lock);
 }
 
 #if QAT_DIGEST_ENABLE_SHA3_256
 static inline void
 updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 {
-	unsigned long flags;
+	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	spin_lock_irqsave(&throughput_sha3_256_lock, flags);
+	// spin_lock_irqsave(&throughput_sha3_256_lock, flags);
+	spin_lock(&throughput_sha3_256_lock);
 
 	sha3_256Time = timespec_add(sha3_256Time, ts);
 	if (likely(sha3_256Time.tv_sec > 0))
@@ -300,7 +308,8 @@ updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, processed / sha3_256Time.tv_sec);
 	}
 
-	spin_unlock_irqrestore(&throughput_sha3_256_lock, flags);
+	// spin_unlock_irqrestore(&throughput_sha3_256_lock, flags);
+	spin_unlock(&throughput_sha3_256_lock);
 }
 #endif
 
@@ -314,14 +323,16 @@ getReadySessionCache(const Cpa16U size)
 	unsigned long flags;
 
 	/* lock for reading and check */
-	read_lock_irqsave(&session_cache_lock, flags);
+	// read_lock_irqsave(&session_cache_lock, flags);
+	read_lock(&session_cache_lock);
 
 	if (likely(sessionCache != NULL))
 	{
 		status = CPA_STATUS_SUCCESS;
 	}
 
-	read_unlock_irqrestore(&session_cache_lock, flags);
+	// read_unlock_irqrestore(&session_cache_lock, flags);
+	read_unlock(&session_cache_lock);
 
 	if (unlikely(CPA_STATUS_SUCCESS != status))
 	{
@@ -540,21 +551,16 @@ qat_cy_callback_polled(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean v
 	pOpData->pCallbackTag = (void *)1;
 }
 
-static CpaStatus
+static void
 releaseInstanceInfo(qat_instance_info_t *info)
 {
-	CpaStatus status = CPA_STATUS_SUCCESS;
-
 	/* Clean up */
-
 	if (likely(info->instanceStarted))
 	{
 		cpaCyStopInstance(info->cyInstHandle);
 		info->instanceStarted = CPA_FALSE;
 		info->instanceReady = CPA_FALSE;
 	}
-
-	return (status);
 }
 
 static CpaStatus
@@ -671,7 +677,7 @@ qat_digest_init(void)
 	if (unlikely(NULL == opCache))
 	{
 		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Op Data (%ld)\n",
-				sizeof(CpaCySymDpOpData));
+			sizeof(CpaCySymDpOpData));
 		goto err;
 	}
 
@@ -721,7 +727,7 @@ qat_digest_init(void)
 
 	return 0;
 
-	err:
+err:
 
 	printk(KERN_ALERT LOG_PREFIX "initialization failed\n");
 
@@ -796,7 +802,6 @@ qat_digest_use_accel(const qat_digest_type_t dir, const size_t s_len)
 static void
 register_error_status(const CpaStatus status)
 {
-
 	switch (status)
 	{
 	case CPA_STATUS_FAIL:
@@ -1095,7 +1100,7 @@ registerFailedRequest(const CpaCySymHashAlgorithm algo) {
 }
 
 static void
-registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, const int dest_len) 
+registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, const int dest_len)
 {
 	switch (algo)
 	{
@@ -1183,8 +1188,8 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 		pOpData->hashStartSrcOffsetInBytes = 0;
 		pOpData->messageLenToHashInBytes = src_len;
 		/* Even though MAC follows immediately after the region to hash
-           digestIsAppended is set to false in this case to workaround
-           errata number IXA00378322 */
+           	digestIsAppended is set to false in this case to workaround
+           	errata number IXA00378322 */
 		pOpData->digestResult = virt_to_phys(&pSrcBuffer[src_len]);
 		pOpData->instanceHandle = cyInstHandle;
 		pOpData->sessionCtx = sessionCtx;
@@ -1216,14 +1221,14 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		// wait for bigger packets longer but at lease 0.5 sec
+		/* wait for bigger packets longer but at lease 0.5 sec */
 		timeout = getTimeoutMs(src_len, QAT_MAX_BUF_SIZE);
 		status = waitForCompletion(cyInstHandle, pOpData, polled, timeout);
 	}
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		// copy data from &pSrcBuffer[src_len]
+		/* copy result data from &pSrcBuffer[src_len] */
 		memcpy(dest, &pSrcBuffer[src_len], digestLength);
 		registerProcessedRequest(algo, src_len, digestLength);
 
@@ -1241,7 +1246,6 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 
 	return (ret);
 }
-
 
 static qat_digest_status_t
 qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymSessionCtx, const CpaBoolean, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
@@ -1286,13 +1290,13 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 		/* populate symmetric session data structure */
 		pSessionSetupData->sessionPriority = CPA_CY_PRIORITY_NORMAL;
 		pSessionSetupData->symOperation = CPA_CY_SYM_OP_HASH,
-				pSessionSetupData->hashSetupData.hashAlgorithm = algo;
+		pSessionSetupData->hashSetupData.hashAlgorithm = algo;
 		pSessionSetupData->hashSetupData.hashMode = CPA_CY_SYM_HASH_MODE_PLAIN;
 		pSessionSetupData->hashSetupData.digestResultLenInBytes = digestLength;
 
 		/* Even though MAC follows immediately after the region to hash
-           digestIsAppended is set to false in this case to workaround
-           errata number IXA00378322 */
+           	digestIsAppended is set to false in this case to workaround
+           	errata number IXA00378322 */
 		pSessionSetupData->digestIsAppended = CPA_FALSE;
 		pSessionSetupData->verifyDigest = CPA_FALSE;
 
@@ -1325,9 +1329,9 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 				instances[instNum].polled,
 				algo, src, src_len, dest);
 
-		CpaStatus sessionStatus = CPA_STATUS_SUCCESS;
-
 		/* Remove the session - session init has already succeeded */
+
+		CpaStatus sessionStatus = CPA_STATUS_SUCCESS;
 
 		/* Wait for inflight requests before removing session */
 		symSessionWaitForInflightReq(sessionCtx);

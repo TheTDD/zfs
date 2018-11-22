@@ -351,11 +351,13 @@ static inline int
 getNextInstance(const Cpa16U num_inst)
 {
 	int inst = 0;
-	unsigned long flags;
+	// unsigned long flags;
 
-	spin_lock_irqsave(&next_instance_lock, flags);
+	// spin_lock_irqsave(&next_instance_lock, flags);
+	spin_lock(&next_instance_lock);
 	inst = atomic_inc_return(&current_instance_number) % num_inst;
-	spin_unlock_irqrestore(&next_instance_lock, flags);
+	// spin_unlock_irqrestore(&next_instance_lock, flags);
+	spin_unlock(&next_instance_lock);
 
 	return (inst);
 }
@@ -364,14 +366,16 @@ static inline CpaBoolean
 check_and_lock(const Cpa16U instanceNr)
 {
 	CpaBoolean ret = CPA_FALSE;
-	unsigned long flags;
+	// unsigned long flags;
 
-	spin_lock_irqsave(&instance_storage_lock, flags);
+	// spin_lock_irqsave(&instance_storage_lock, flags);
+	spin_lock(&instance_storage_lock);
 	if (likely(0 == atomic_read(&instance_lock[instanceNr]))) {
 		atomic_inc(&instance_lock[instanceNr]);
 		ret = CPA_TRUE;
 	}
-	spin_unlock_irqrestore(&instance_storage_lock, flags);
+	// spin_unlock_irqrestore(&instance_storage_lock, flags);
+	spin_unlock(&instance_storage_lock);
 
 	return (ret);
 }
@@ -379,20 +383,23 @@ check_and_lock(const Cpa16U instanceNr)
 static inline void
 unlock_instance(const Cpa16U instanceNr)
 {
-	unsigned long flags;
-	spin_lock_irqsave(&instance_storage_lock, flags);
+	// unsigned long flags;
+	// spin_lock_irqsave(&instance_storage_lock, flags);
+	spin_lock(&instance_storage_lock);
 	atomic_dec(&instance_lock[instanceNr]);
-	spin_unlock_irqrestore(&instance_storage_lock, flags);
+	// spin_unlock_irqrestore(&instance_storage_lock, flags);
+	spin_unlock(&instance_storage_lock);
 }
 
 static inline void
 updateThroughputComp(const uint64_t start, const uint64_t end)
 {
-	unsigned long flags;
+	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	spin_lock_irqsave(&compression_time_lock, flags);
+	// spin_lock_irqsave(&compression_time_lock, flags);
+	spin_lock(&compression_time_lock);
 
 	compressionTime = timespec_add(compressionTime, ts);
 	if (likely(compressionTime.tv_sec > 0))
@@ -401,17 +408,19 @@ updateThroughputComp(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_dc_stats.comp_throughput_bps.value.ui64, processed / compressionTime.tv_sec);
 	}
 
-	spin_unlock_irqrestore(&compression_time_lock, flags);
+	// spin_unlock_irqrestore(&compression_time_lock, flags);
+	spin_unlock(&compression_time_lock);
 }
 
 static inline void
 updateThroughputDecomp(const uint64_t start, const uint64_t end)
 {
-	unsigned long flags;
+	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	spin_lock_irqsave(&decompression_time_lock, flags);
+	// spin_lock_irqsave(&decompression_time_lock, flags);
+	spin_lock(&decompression_time_lock);
 
 	decompressionTime = timespec_add(decompressionTime, ts);
 	if (likely(decompressionTime.tv_sec > 0))
@@ -420,7 +429,8 @@ updateThroughputDecomp(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_dc_stats.decomp_throughput_bps.value.ui64, processed / decompressionTime.tv_sec);
 	}
 
-	spin_unlock_irqrestore(&decompression_time_lock, flags);
+	// spin_unlock_irqrestore(&decompression_time_lock, flags);
+	spin_unlock(&decompression_time_lock);
 }
 
 /*******************************************************
@@ -601,14 +611,16 @@ getReadySessionCache(Cpa16U size)
 	unsigned long flags;
 
 	/* lock for reading and check */
-	read_lock_irqsave(&session_cache_lock, flags);
+	// read_lock_irqsave(&session_cache_lock, flags);
+	read_lock(&session_cache_lock);
 
 	if (likely(sessionCache != NULL))
 	{
 		status = CPA_STATUS_SUCCESS;
 	}
 
-	read_unlock_irqrestore(&session_cache_lock, flags);
+	// read_unlock_irqrestore(&session_cache_lock, flags);
+	read_unlock(&session_cache_lock);
 
 	if (unlikely(CPA_STATUS_SUCCESS != status))
 	{
@@ -686,14 +698,16 @@ getReadyMetadataCache(Cpa16U size)
         unsigned long flags;
 
         /* lock for reading and check */
-        read_lock_irqsave(&metadata_cache_lock, flags);
+        // read_lock_irqsave(&metadata_cache_lock, flags);
+        read_lock(&metadata_cache_lock);
 
         if (likely(metadataCache != NULL))
         {
                 status = CPA_STATUS_SUCCESS;
         }
 
-        read_unlock_irqrestore(&metadata_cache_lock, flags);
+        // read_unlock_irqrestore(&metadata_cache_lock, flags);
+        read_unlock(&metadata_cache_lock);
 
         if (unlikely(CPA_STATUS_SUCCESS != status))
         {
