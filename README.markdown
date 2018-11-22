@@ -18,6 +18,23 @@ News on this release:
 
 To avoid initialization failures at boot time caused by QAT starting later then ZFS module is loaded I can suggest to put `options zfs zfs_qat_disable=1` into `/etc/modprobe.d/zfs.conf`, then create a systemd service which starts after QAT and enables QAT in ZFS with `echo 0 > /sys/modules/zfs/parameters/zfs_qat_disable`.
 
+```
+# cat /etc/systemd/system/zfs-qat.service 
+[Unit]
+Description=Intel QuickAssist Support for ZFS file system
+DefaultDependencies=no
+After=qat_service.service
+After=zfs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/zfs_qat on
+ExecStop=/usr/local/bin/zfs_qat off
+
+[Install]
+WantedBy=multi-user.target
+```
 # ZFS module parameters
 ```
 [root@bg]# modinfo zfs | grep qat
