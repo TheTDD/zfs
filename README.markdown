@@ -6,12 +6,12 @@ The QAT implementation uses fast and simple [Data Plane DC API](https://01.org/s
 
 News on this release:
 
-- early initialization of QAT is not required, the qat_service may be stopped and started at any time
+- early initialization of QAT is not required, module lazily initializes QAT when it is ready
 - support of GZIP compression level (gzip-1 to gzip-9)
 - statistics `/proc/spl/kstat/zfs/qat` changed to `/proc/spl/kstat/zfs/qat-dc`, added new statistics `/proc/spl/kstat/zfs/qat-cy`
 - extended statistics includes throughput and counts of errors and operation status
 - statistics is visible always even if QAT is not exists or is not initialized, but remains zero of course
-- implementation is using exclusively kernel memory caches for flat source, destination and intermediate buffers to avoid valuable kernel memory fragmentation
+- implementation is using kernel memory caches for flat source, destination and intermediate buffers to avoid fragmentation of valuable kernel memory
 - qat compression, decompression and checksum can be disabled independently (for by example benchmarking, comparing with sw-implementation or development/debugging purposes)
 - access to QAT can be disabled completely with `zfs_qat_disable` parameter
 - QAT support disables itself automatically (independent for DC and CY) if can't initialize corresponding DC or CY instances after configurable number of requests (default 100). The threshold is configurable by zfs module parameter `zfs_qat_init_failure_threshold`
