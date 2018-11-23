@@ -264,7 +264,7 @@ static struct kmem_cache *bufferListPtrCache = NULL;
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t initialized = ATOMIC_INIT(0);
 static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };
-static atomic_t current_instance_number = ATOMIC_INIT(0);
+static atomic_t current_instance_number = ATOMIC_INIT(-1);
 
 static spinlock_t instance_storage_lock;
 static spinlock_t next_instance_lock;
@@ -1143,7 +1143,7 @@ getReadyInstanceInfo(const CpaInstanceHandle dcInstHandle, int instNum, qat_inst
 
 		if (likely(CPA_STATUS_SUCCESS == status))
 		{
-			printk(KERN_DEBUG LOG_PREFIX "instance %d is ready\n", info->instNum);
+			// printk(KERN_DEBUG LOG_PREFIX "instance %d is ready\n", info->instNum);
 			info->instanceReady = CPA_TRUE;
 		}
 	}

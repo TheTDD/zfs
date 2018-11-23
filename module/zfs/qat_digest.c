@@ -201,7 +201,7 @@ static struct kmem_cache *bufferCache = NULL;
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t initialized = ATOMIC_INIT(0);
 static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };
-static atomic_t current_instance_number = ATOMIC_INIT(0);
+static atomic_t current_instance_number = ATOMIC_INIT(-1);
 
 static atomic_long_t noInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
