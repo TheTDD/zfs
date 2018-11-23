@@ -228,12 +228,9 @@ static inline int
 getNextInstance(const Cpa16U num_inst)
 {
 	int inst = 0;
-	// unsigned long flags;
 
-	// spin_lock_irqsave(&next_instance_lock, flags);
 	spin_lock(&next_instance_lock);
 	inst = atomic_inc_return(&current_instance_number) % num_inst;
-	// spin_unlock_irqrestore(&next_instance_lock, flags);
 	spin_unlock(&next_instance_lock);
 
 	return (inst);
@@ -243,16 +240,13 @@ static inline CpaBoolean
 check_and_lock(const Cpa16U i)
 {
 	CpaBoolean ret = CPA_FALSE;
-	// unsigned long flags;
 
-	// spin_lock_irqsave(&instance_storage_lock, flags);
 	spin_lock(&instance_storage_lock);
 	if (likely(0 == atomic_read(&instance_lock[i])))
 	{
 		atomic_inc(&instance_lock[i]);
 		ret = CPA_TRUE;
 	}
-	// spin_unlock_irqrestore(&instance_storage_lock, flags);
 	spin_unlock(&instance_storage_lock);
 
 	return (ret);
@@ -261,22 +255,17 @@ check_and_lock(const Cpa16U i)
 static inline void
 unlock_instance(const Cpa16U i)
 {
-	// unsigned long flags;
-	// spin_lock_irqsave(&instance_storage_lock, flags);
 	spin_lock(&instance_storage_lock);
 	atomic_dec(&instance_lock[i]);
-	// spin_unlock_irqrestore(&instance_storage_lock, flags);
 	spin_unlock(&instance_storage_lock);
 }
 
 static inline void
 updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 {
-	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	// spin_lock_irqsave(&throughput_sha2_256_lock, flags);
 	spin_lock(&throughput_sha2_256_lock);
 
 	sha2_256Time = timespec_add(sha2_256Time, ts);
@@ -286,7 +275,6 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, processed / sha2_256Time.tv_sec);
 	}
 
-	// spin_unlock_irqrestore(&throughput_sha2_256_lock, flags);
 	spin_unlock(&throughput_sha2_256_lock);
 }
 
@@ -294,11 +282,9 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 static inline void
 updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 {
-	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	// spin_lock_irqsave(&throughput_sha3_256_lock, flags);
 	spin_lock(&throughput_sha3_256_lock);
 
 	sha3_256Time = timespec_add(sha3_256Time, ts);
@@ -308,7 +294,6 @@ updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, processed / sha3_256Time.tv_sec);
 	}
 
-	// spin_unlock_irqrestore(&throughput_sha3_256_lock, flags);
 	spin_unlock(&throughput_sha3_256_lock);
 }
 #endif
@@ -323,7 +308,6 @@ getReadySessionCache(const Cpa16U size)
 	unsigned long flags;
 
 	/* lock for reading and check */
-	// read_lock_irqsave(&session_cache_lock, flags);
 	read_lock(&session_cache_lock);
 
 	if (likely(sessionCache != NULL))
@@ -331,7 +315,6 @@ getReadySessionCache(const Cpa16U size)
 		status = CPA_STATUS_SUCCESS;
 	}
 
-	// read_unlock_irqrestore(&session_cache_lock, flags);
 	read_unlock(&session_cache_lock);
 
 	if (unlikely(CPA_STATUS_SUCCESS != status))
@@ -359,8 +342,10 @@ getReadySessionCache(const Cpa16U size)
 	return status;
 }
 
-// CpaCySymSessionCtx is already a pointer
-// so it will be translated to void **
+/*
+  CpaCySymSessionCtx is already a pointer
+  so it will be translated to void **
+*/
 static inline CpaStatus
 CREATE_SESSION(CpaCySymSessionCtx *sessionCtx)
 {
@@ -487,6 +472,7 @@ _destroy_buffer(Cpa8U **ptr)
 #define MAX_DIGEST_LENGTH SHA2_256_DIGEST_LENGTH
 #endif
 
+/* get type of instance, polled (1) or interrupt (0) */
 static CpaStatus
 isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 {
@@ -497,7 +483,6 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		// get type of instance, polled (1) or interrupt (0)
 		status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
 	}
 
@@ -511,7 +496,7 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 	return status;
 }
 
-// warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name
+/* Warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name */
 static CpaStatus
 getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 {
@@ -522,7 +507,6 @@ getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		// get name of instance
 		status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
 	}
 
@@ -558,9 +542,10 @@ releaseInstanceInfo(qat_instance_info_t *info)
 	if (likely(info->instanceStarted))
 	{
 		cpaCyStopInstance(info->cyInstHandle);
-		info->instanceStarted = CPA_FALSE;
-		info->instanceReady = CPA_FALSE;
 	}
+
+	info->instanceStarted = CPA_FALSE;
+	info->instanceReady = CPA_FALSE;
 }
 
 static CpaStatus
@@ -587,7 +572,7 @@ getReadyInstanceInfo(const CpaInstanceHandle cyInstHandle, int instNum, qat_inst
 			info->instNum = instNum;
 			info->instanceStarted = CPA_TRUE;
 		}
-		/*
+/*
 #if 0
     if (CPA_STATUS_SUCCESS == status)
     {
@@ -606,7 +591,7 @@ getReadyInstanceInfo(const CpaInstanceHandle cyInstHandle, int instNum, qat_inst
 	}
     }
 #endif
-		 */
+*/
 		if (likely(CPA_STATUS_SUCCESS == status))
 		{
 			/*
@@ -635,7 +620,7 @@ getReadyInstanceInfo(const CpaInstanceHandle cyInstHandle, int instNum, qat_inst
 
 		if (likely(CPA_STATUS_SUCCESS == status))
 		{
-			printk(KERN_DEBUG LOG_PREFIX "instance %d is ready\n", info->instNum);
+			// printk(KERN_DEBUG LOG_PREFIX "instance %d is ready\n", info->instNum);
 			info->instanceReady = CPA_TRUE;
 		}
 	}
@@ -666,7 +651,7 @@ qat_digest_init(void)
 	else
 	{
 		printk(KERN_CRIT LOG_PREFIX "failed to allocate instance cache storage (%d)\n",
-				qatInfoSize);
+			qatInfoSize);
 		goto err;
 	}
 
@@ -1023,9 +1008,7 @@ symSessionWaitForInflightReq(CpaCySymSessionCtx pSessionCtx)
 	do
 	{
 		cpaCySymSessionInUse(pSessionCtx, &sessionInUse);
-		// if (CPA_TRUE == sessionInUse) {
-		//    yield();
-		// }
+
 	} while (sessionInUse);
 #endif
 	return;
@@ -1187,9 +1170,6 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 		 */
 		pOpData->hashStartSrcOffsetInBytes = 0;
 		pOpData->messageLenToHashInBytes = src_len;
-		/* Even though MAC follows immediately after the region to hash
-           	digestIsAppended is set to false in this case to workaround
-           	errata number IXA00378322 */
 		pOpData->digestResult = virt_to_phys(&pSrcBuffer[src_len]);
 		pOpData->instanceHandle = cyInstHandle;
 		pOpData->sessionCtx = sessionCtx;

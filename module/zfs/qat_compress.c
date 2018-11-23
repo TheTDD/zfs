@@ -252,11 +252,14 @@ static struct kmem_cache *zlibCache = NULL;
 static struct kmem_cache *bufferCache = NULL;
 static struct kmem_cache *flatbufferCache = NULL;
 static struct kmem_cache *interBufferCache = NULL;
+static struct kmem_cache *bufferListCache = NULL;
 
 /* dynamic cache, sessions */
 static struct kmem_cache *sessionCache = NULL;
 /* dynamic cache, metadata-cache: buffMetaSize */
 static struct kmem_cache *metadataCache = NULL;
+/* dynamic cache N x sizeof(CpaBufferList*) */
+static struct kmem_cache *bufferListPtrCache = NULL;
 
 static atomic_t numInitFailed = ATOMIC_INIT(0);
 static atomic_t initialized = ATOMIC_INIT(0);
@@ -269,6 +272,7 @@ static spinlock_t compression_time_lock;
 static spinlock_t decompression_time_lock;
 static rwlock_t session_cache_lock;
 static rwlock_t metadata_cache_lock;
+static rwlock_t bufferlistptr_cache_lock;
 
 static atomic_long_t noInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
@@ -351,12 +355,9 @@ static inline int
 getNextInstance(const Cpa16U num_inst)
 {
 	int inst = 0;
-	// unsigned long flags;
 
-	// spin_lock_irqsave(&next_instance_lock, flags);
 	spin_lock(&next_instance_lock);
 	inst = atomic_inc_return(&current_instance_number) % num_inst;
-	// spin_unlock_irqrestore(&next_instance_lock, flags);
 	spin_unlock(&next_instance_lock);
 
 	return (inst);
@@ -366,15 +367,12 @@ static inline CpaBoolean
 check_and_lock(const Cpa16U instanceNr)
 {
 	CpaBoolean ret = CPA_FALSE;
-	// unsigned long flags;
 
-	// spin_lock_irqsave(&instance_storage_lock, flags);
 	spin_lock(&instance_storage_lock);
 	if (likely(0 == atomic_read(&instance_lock[instanceNr]))) {
 		atomic_inc(&instance_lock[instanceNr]);
 		ret = CPA_TRUE;
 	}
-	// spin_unlock_irqrestore(&instance_storage_lock, flags);
 	spin_unlock(&instance_storage_lock);
 
 	return (ret);
@@ -383,22 +381,17 @@ check_and_lock(const Cpa16U instanceNr)
 static inline void
 unlock_instance(const Cpa16U instanceNr)
 {
-	// unsigned long flags;
-	// spin_lock_irqsave(&instance_storage_lock, flags);
 	spin_lock(&instance_storage_lock);
 	atomic_dec(&instance_lock[instanceNr]);
-	// spin_unlock_irqrestore(&instance_storage_lock, flags);
 	spin_unlock(&instance_storage_lock);
 }
 
 static inline void
 updateThroughputComp(const uint64_t start, const uint64_t end)
 {
-	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	// spin_lock_irqsave(&compression_time_lock, flags);
 	spin_lock(&compression_time_lock);
 
 	compressionTime = timespec_add(compressionTime, ts);
@@ -408,18 +401,15 @@ updateThroughputComp(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_dc_stats.comp_throughput_bps.value.ui64, processed / compressionTime.tv_sec);
 	}
 
-	// spin_unlock_irqrestore(&compression_time_lock, flags);
 	spin_unlock(&compression_time_lock);
 }
 
 static inline void
 updateThroughputDecomp(const uint64_t start, const uint64_t end)
 {
-	// unsigned long flags;
 	struct timespec ts;
 	jiffies_to_timespec(end - start, &ts);
 
-	// spin_lock_irqsave(&decompression_time_lock, flags);
 	spin_lock(&decompression_time_lock);
 
 	decompressionTime = timespec_add(decompressionTime, ts);
@@ -429,8 +419,49 @@ updateThroughputDecomp(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_dc_stats.decomp_throughput_bps.value.ui64, processed / decompressionTime.tv_sec);
 	}
 
-	// spin_unlock_irqrestore(&decompression_time_lock, flags);
 	spin_unlock(&decompression_time_lock);
+}
+
+/*******************************************************
+ * CpaBufferList (static cache)
+ *******************************************************/
+static inline CpaStatus
+CREATE_BUFFERLIST(CpaBufferList **ptr)
+{
+        CpaStatus status = CPA_STATUS_FAIL;
+
+        /* set to NULL even if it fails to avoid dealocation issues later */
+        *ptr = NULL;
+
+        if (likely(NULL != bufferListCache))
+        {
+                void *result = kmem_cache_alloc(bufferListCache, GFP_KERNEL);
+                if (likely(NULL != result))
+                {
+                        *ptr = (CpaBufferList*)result;
+                        status = CPA_STATUS_SUCCESS;
+                }
+                else
+                {
+                        status = CPA_STATUS_RESOURCE;
+                }
+        }
+
+        return status;
+}
+
+#define DESTROY_BUFFERLIST(ptr) _destroy_bufferlist(&(ptr))
+static inline void
+_destroy_bufferlist(CpaBufferList **ptr)
+{
+        if (likely(NULL != *ptr))
+        {
+                if (likely(NULL != bufferListCache))
+                {
+                        kmem_cache_free(bufferListCache, *ptr);
+                }
+                *ptr = NULL;
+        }
 }
 
 /*******************************************************
@@ -611,7 +642,6 @@ getReadySessionCache(Cpa16U size)
 	unsigned long flags;
 
 	/* lock for reading and check */
-	// read_lock_irqsave(&session_cache_lock, flags);
 	read_lock(&session_cache_lock);
 
 	if (likely(sessionCache != NULL))
@@ -619,7 +649,6 @@ getReadySessionCache(Cpa16U size)
 		status = CPA_STATUS_SUCCESS;
 	}
 
-	// read_unlock_irqrestore(&session_cache_lock, flags);
 	read_unlock(&session_cache_lock);
 
 	if (unlikely(CPA_STATUS_SUCCESS != status))
@@ -698,7 +727,6 @@ getReadyMetadataCache(Cpa16U size)
         unsigned long flags;
 
         /* lock for reading and check */
-        // read_lock_irqsave(&metadata_cache_lock, flags);
         read_lock(&metadata_cache_lock);
 
         if (likely(metadataCache != NULL))
@@ -706,7 +734,6 @@ getReadyMetadataCache(Cpa16U size)
                 status = CPA_STATUS_SUCCESS;
         }
 
-        // read_unlock_irqrestore(&metadata_cache_lock, flags);
         read_unlock(&metadata_cache_lock);
 
         if (unlikely(CPA_STATUS_SUCCESS != status))
@@ -773,6 +800,88 @@ _destroy_metadata(void **ptr)
 }
 
 /*******************************************************
+ * BufferListPtr N x sizeof(CpaBufferList) (dynamic cache)
+ *******************************************************/
+static inline CpaStatus
+getReadyBufferListPtrCache(Cpa16U size)
+{
+        CpaStatus status = CPA_STATUS_FAIL;
+        unsigned long flags;
+
+        /* lock for reading and check */
+        read_lock(&bufferlistptr_cache_lock);
+
+        if (likely(bufferListPtrCache != NULL))
+        {
+                status = CPA_STATUS_SUCCESS;
+        }
+
+        read_unlock(&bufferlistptr_cache_lock);
+
+        if (unlikely(CPA_STATUS_SUCCESS != status))
+        {
+                /* lock for writing and create, happens only once */
+                write_lock_irqsave(&bufferlistptr_cache_lock, flags);
+
+                bufferListPtrCache = kmem_cache_create("CpaDcBufferListPtr",
+                        size, DEFAULT_ALIGN_CACHE,
+                        0, NULL);
+                if (likely(NULL != bufferListPtrCache))
+                {
+                        printk(KERN_DEBUG LOG_PREFIX "create kernel cache for buffer list pointers (%d)\n", size);
+                        status = CPA_STATUS_SUCCESS;
+                }
+                else
+                {
+                        printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for buffer list pointers (%d)\n", size);
+                        status = CPA_STATUS_RESOURCE;
+                }
+
+                write_unlock_irqrestore(&bufferlistptr_cache_lock, flags);
+        }
+
+        return status;
+}
+
+static inline CpaStatus
+CREATE_BUFFERLISTPTR(CpaBufferList ***ptr)
+{
+        CpaStatus status = CPA_STATUS_FAIL;
+
+        *ptr = NULL;
+
+        if (likely(NULL != bufferListPtrCache))
+        {
+                void *result = kmem_cache_alloc(bufferListPtrCache, GFP_KERNEL);
+                if (likely(NULL != result))
+                {
+		    	*ptr = (CpaBufferList**)result;
+                        status = CPA_STATUS_SUCCESS;
+                }
+                else
+                {
+                        status = CPA_STATUS_RESOURCE;
+                }
+        }
+
+        return status;
+}
+
+#define DESTROY_BUFFERLISTPTR(ptr) _destroy_bufferlistptr(&(ptr))
+static inline void
+_destroy_bufferlistptr(CpaBufferList ***ptr)
+{
+        if (likely(NULL != *ptr))
+        {
+                if (likely(NULL != bufferListPtrCache))
+                {
+                        kmem_cache_free(bufferListPtrCache, *ptr);
+                }
+                *ptr = NULL;
+        }
+}
+
+/*******************************************************
  * Intermediate buffers (static cache)
  *******************************************************/
 static inline CpaStatus
@@ -814,18 +923,18 @@ _destroy_interbuffer(Cpa8U **ptr)
         }
 }
 
-static CpaStatus
+static void
 releaseInstanceInfo(qat_instance_info_t *info)
 {
-	CpaStatus status = CPA_STATUS_SUCCESS;
 	Cpa16U bufferNum;
 
 	if (likely(info->instanceStarted))
 	{
 		cpaDcStopInstance(info->dcInstHandle);
-		info->instanceStarted = CPA_FALSE;
-		info->instanceReady = CPA_FALSE;
 	}
+
+	info->instanceStarted = CPA_FALSE;
+	info->instanceReady = CPA_FALSE;
 
 	/* Free intermediate buffers */
 	if (likely(info->bufferInterArray != NULL))
@@ -843,15 +952,14 @@ releaseInstanceInfo(qat_instance_info_t *info)
 				}
 				// PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]->pPrivateMetaData);
 				DESTROY_METADATA(info->bufferInterArray[bufferNum]->pPrivateMetaData);
-				PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]);
-				// DESTROY_BUFFERLIST(bufferInterArray[bufferNum]);
+				// PHYS_CONTIG_FREE(info->bufferInterArray[bufferNum]);
+				DESTROY_BUFFERLIST(info->bufferInterArray[bufferNum]);
 			}
 		}
-		PHYS_CONTIG_FREE(info->bufferInterArray);
-		// DESTROY_BUFFERLISTPTR(bufferInterArray);
+		// PHYS_CONTIG_FREE(info->bufferInterArray);
+		DESTROY_BUFFERLISTPTR(info->bufferInterArray);
 	}
 
-	return (status);
 }
 
 static CpaStatus
@@ -919,26 +1027,26 @@ getReadyInstanceInfo(const CpaInstanceHandle dcInstHandle, int instNum, qat_inst
 			{
 				status = getReadyMetadataCache(buffMetaSize);
 			}
-			/*
+			
                         if (CPA_STATUS_SUCCESS == status && 0 != info->numInterBuffLists)
                         {
-                            status = getReadyBufferListPtrCache(numInterBuffLists * sizeof(CpaBufferList *));
+                            status = getReadyBufferListPtrCache(info->numInterBuffLists * sizeof(CpaBufferList *));
                         }
-			 */
+			
 			if (CPA_STATUS_SUCCESS == status && 0 != info->numInterBuffLists)
 			{
-			    // TODO: dyn cache
-				status = PHYS_CONTIG_ALLOC(&info->bufferInterArray, info->numInterBuffLists * sizeof(CpaBufferList *));
-				// status = CREATE_BUFFERLISTPTR(&bufferInterArray);
+			    	// dyn cache
+				// status = PHYS_CONTIG_ALLOC(&info->bufferInterArray, info->numInterBuffLists * sizeof(CpaBufferList *));
+				status = CREATE_BUFFERLISTPTR(&info->bufferInterArray);
 			}
 
 			for (bufferNum = 0; bufferNum < info->numInterBuffLists; bufferNum++)
 			{
 				if (likely(CPA_STATUS_SUCCESS == status))
 				{
-					// TODO: static cache
-					status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum], sizeof(CpaBufferList));
-					// status = CREATE_BUFFERLIST(&bufferInterArray[bufferNum]);
+					// static cache
+					// status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum], sizeof(CpaBufferList));
+					status = CREATE_BUFFERLIST(&info->bufferInterArray[bufferNum]);
 				}
 				else
 				{
@@ -1043,7 +1151,7 @@ getReadyInstanceInfo(const CpaInstanceHandle dcInstHandle, int instNum, qat_inst
 failed:
 
 	VIRT_FREE(pCap);
-	
+
 	return (status);
 }
 
@@ -1130,6 +1238,15 @@ qat_compress_init(void)
             goto err;
         }
 
+        bufferListCache = kmem_cache_create("CpaDcBufferList",
+                sizeof(CpaBufferList),
+                DEFAULT_ALIGN_CACHE, 0, NULL);
+        if (unlikely(NULL == bufferListCache))
+        {
+            printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for buffer lists (%ld)\n", sizeof(CpaBufferList));
+            goto err;
+        }
+
 	/* install statistics at /proc/spl/kstat/zfs/qat-dc */
 	qat_ksp = kstat_create("zfs", 0, "qat-dc", "misc",
 			KSTAT_TYPE_NAMED, sizeof (qat_dc_stats) / sizeof (kstat_named_t),
@@ -1158,6 +1275,7 @@ qat_compress_init(void)
 	spin_lock_init(&next_instance_lock);
 	rwlock_init(&session_cache_lock);
 	rwlock_init(&metadata_cache_lock);
+	rwlock_init(&bufferlistptr_cache_lock);
 
 	spin_lock_init(&compression_time_lock);
 	spin_lock_init(&decompression_time_lock);
@@ -1203,6 +1321,7 @@ qat_compress_fini(void)
 	DESTROY_CACHE(bufferCache);
 	DESTROY_CACHE(interBufferCache);
 	DESTROY_CACHE(flatbufferCache);
+	DESTROY_CACHE(bufferListCache);
 
 	// caches are created dynamically
 	write_lock_irqsave(&session_cache_lock, flags);
@@ -1212,6 +1331,10 @@ qat_compress_fini(void)
 	write_lock_irqsave(&metadata_cache_lock, flags);
 	DESTROY_CACHE(metadataCache);
 	write_unlock_irqrestore(&metadata_cache_lock, flags);
+
+	write_lock_irqsave(&bufferlistptr_cache_lock, flags);
+	DESTROY_CACHE(bufferListPtrCache);
+	write_unlock_irqrestore(&bufferlistptr_cache_lock, flags);
 
 }
 
@@ -1954,7 +2077,7 @@ compPerformOp(const CpaInstanceHandle dcInstHandle, const CpaDcSessionHandle ses
 		}
 	    	DESTROY_FLATBUFFER(footerBuf);
 	}
-	
+
 	VIRT_FREE(pComplete);
 
 	return ret;
