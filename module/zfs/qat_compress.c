@@ -121,7 +121,7 @@ typedef struct qat_stats
 	kstat_named_t comp_fails;
 	/* compression throughput in bytes-per-second */
 	kstat_named_t comp_throughput_bps;
-
+	kstat_named_t comp_requests_per_second;
 	/*
 	 * Number of jobs submitted to qat de-compression engine.
 	 */
@@ -144,6 +144,7 @@ typedef struct qat_stats
 	kstat_named_t decomp_fails;
 	/* decompression throughput in bytes-per-second */
 	kstat_named_t decomp_throughput_bps;
+	kstat_named_t decomp_requests_per_second;
 
 	/* number of times no available instance found (all are busy)
 	   if you see this number high, increase amount of instances in
@@ -188,6 +189,7 @@ qat_stats_t qat_dc_stats = {
 		{ "comp_total_out_bytes",		KSTAT_DATA_UINT64 },
 		{ "comp_fails",				KSTAT_DATA_UINT64 },
 		{ "comp_throughput_bps",		KSTAT_DATA_UINT64 },
+		{ "comp_requests_per_second",		KSTAT_DATA_UINT64 },
 
 		{ "decomp_requests",			KSTAT_DATA_UINT64 },
 		{ "decomp_total_in_bytes",		KSTAT_DATA_UINT64 },
@@ -195,6 +197,7 @@ qat_stats_t qat_dc_stats = {
 		{ "decomp_total_out_bytes",		KSTAT_DATA_UINT64 },
 		{ "decomp_fails",			KSTAT_DATA_UINT64 },
 		{ "decomp_throughput_bps",		KSTAT_DATA_UINT64 },
+		{ "decomp_requests_per_second",		KSTAT_DATA_UINT64 },
 
 		{ "err_no_instance_available",          KSTAT_DATA_UINT64 },
 		{ "err_out_of_mem",			KSTAT_DATA_UINT64 },
@@ -241,6 +244,7 @@ typedef struct qat_instance_info
 #define MAX_INSTANCES 128
 
 /* module parameters */
+int zfs_qat_disable_dc_benchmark = 0;
 int zfs_qat_disable_compression = 0;
 int zfs_qat_disable_decompression = 0;
 
@@ -266,10 +270,10 @@ static atomic_t initialized = ATOMIC_INIT(0);
 static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };
 static atomic_t current_instance_number = ATOMIC_INIT(-1);
 
-static spinlock_t instance_storage_lock;
 static spinlock_t next_instance_lock;
 static spinlock_t compression_time_lock;
 static spinlock_t decompression_time_lock;
+static rwlock_t instance_storage_lock;
 static rwlock_t session_cache_lock;
 static rwlock_t metadata_cache_lock;
 static rwlock_t bufferlistptr_cache_lock;
@@ -280,6 +284,8 @@ static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
 
 static volatile struct timespec compressionTime = {0};
 static volatile struct timespec decompressionTime = {0};
+
+static struct timespec engineStarted = {0};
 
 #define	QAT_STAT_INCR(stat, val) \
 		atomic_add_64(&qat_dc_stats.stat.value.ui64, (val));
@@ -368,12 +374,12 @@ check_and_lock(const Cpa16U instanceNr)
 {
 	CpaBoolean ret = CPA_FALSE;
 
-	spin_lock(&instance_storage_lock);
+	write_lock(&instance_storage_lock);
 	if (likely(0 == atomic_read(&instance_lock[instanceNr]))) {
 		atomic_inc(&instance_lock[instanceNr]);
 		ret = CPA_TRUE;
 	}
-	spin_unlock(&instance_storage_lock);
+	write_unlock(&instance_storage_lock);
 
 	return (ret);
 }
@@ -381,15 +387,21 @@ check_and_lock(const Cpa16U instanceNr)
 static inline void
 unlock_instance(const Cpa16U instanceNr)
 {
-	spin_lock(&instance_storage_lock);
+	write_lock(&instance_storage_lock);
 	atomic_dec(&instance_lock[instanceNr]);
-	spin_unlock(&instance_storage_lock);
+	write_unlock(&instance_storage_lock);
 }
 
 static inline void
 updateThroughputComp(const uint64_t start, const uint64_t end)
 {
 	struct timespec ts;
+        struct timespec now;
+        struct timespec diff;
+
+        getnstimeofday(&now);
+        diff = timespec_sub(now, engineStarted);
+
 	jiffies_to_timespec(end - start, &ts);
 
 	spin_lock(&compression_time_lock);
@@ -401,6 +413,12 @@ updateThroughputComp(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_dc_stats.comp_throughput_bps.value.ui64, processed / compressionTime.tv_sec);
 	}
 
+	if (likely(diff.tv_sec > 0))
+        {
+                atomic_swap_64(&qat_dc_stats.comp_requests_per_second.value.ui64,
+                        qat_dc_stats.comp_requests.value.ui64 / diff.tv_sec);
+        }
+
 	spin_unlock(&compression_time_lock);
 }
 
@@ -408,6 +426,12 @@ static inline void
 updateThroughputDecomp(const uint64_t start, const uint64_t end)
 {
 	struct timespec ts;
+        struct timespec now;
+        struct timespec diff;
+
+        getnstimeofday(&now);
+        diff = timespec_sub(now, engineStarted);
+
 	jiffies_to_timespec(end - start, &ts);
 
 	spin_lock(&decompression_time_lock);
@@ -419,6 +443,11 @@ updateThroughputDecomp(const uint64_t start, const uint64_t end)
 		atomic_swap_64(&qat_dc_stats.decomp_throughput_bps.value.ui64, processed / decompressionTime.tv_sec);
 	}
 
+	if (likely(diff.tv_sec > 0))
+        {
+                atomic_swap_64(&qat_dc_stats.decomp_requests_per_second.value.ui64,
+                        qat_dc_stats.decomp_requests.value.ui64 / diff.tv_sec);
+        }
 	spin_unlock(&decompression_time_lock);
 }
 
@@ -1271,20 +1300,21 @@ qat_compress_init(void)
 		printk(KERN_INFO LOG_PREFIX "initialized\n");
 	}
 
-	spin_lock_init(&instance_storage_lock);
 	spin_lock_init(&next_instance_lock);
+	spin_lock_init(&compression_time_lock);
+	spin_lock_init(&decompression_time_lock);
+
+	rwlock_init(&instance_storage_lock);
 	rwlock_init(&session_cache_lock);
 	rwlock_init(&metadata_cache_lock);
 	rwlock_init(&bufferlistptr_cache_lock);
 
-	spin_lock_init(&compression_time_lock);
-	spin_lock_init(&decompression_time_lock);
-
+	getnstimeofday(&engineStarted);
 	atomic_inc(&initialized);
 
 	return 0;
 
-	err:
+err:
 
 	printk(KERN_ALERT LOG_PREFIX "initialization failed\n");
 
@@ -2488,7 +2518,8 @@ qat_compress(const qat_compress_dir_t dir, const int level, const char *src, con
 		ret = qat_action(compPerformOp, level, src, src_len, dest, dest_len, c_len);
 		if (likely(QAT_COMPRESS_SUCCESS == ret))
 		{
-			updateThroughputComp(start, jiffies);
+			if (0 == zfs_qat_disable_dc_benchmark)
+				updateThroughputComp(start, jiffies);
 		}
 		break;
 
@@ -2496,7 +2527,8 @@ qat_compress(const qat_compress_dir_t dir, const int level, const char *src, con
 		ret = qat_action(decompPerformOp, level, src, src_len, dest, dest_len, c_len);
 		if (likely(QAT_COMPRESS_SUCCESS == ret))
 		{
-			updateThroughputDecomp(start, jiffies);
+			if (0 == zfs_qat_disable_dc_benchmark)
+				updateThroughputDecomp(start, jiffies);
 		}
 		break;
 
@@ -2507,6 +2539,9 @@ qat_compress(const qat_compress_dir_t dir, const int level, const char *src, con
 
 	return ret;
 }
+
+module_param(zfs_qat_disable_dc_benchmark, int, 0644);
+MODULE_PARM_DESC(zfs_qat_disable_dc_benchmark, "Disable data compression benchmark");
 
 module_param(zfs_qat_disable_compression, int, 0644);
 MODULE_PARM_DESC(zfs_qat_disable_compression, "Disable QAT compression");

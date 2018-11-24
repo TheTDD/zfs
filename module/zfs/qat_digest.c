@@ -68,7 +68,6 @@ QAT software that can apply for requests of a certain size.
  */
 typedef struct qat_stats
 {
-
 	/*
 	 * Number of times engine is failed to initialize.
 	 */
@@ -96,6 +95,7 @@ typedef struct qat_stats
 
 	/* sha2-235 throughput in bytes-per-sec */
 	kstat_named_t sha2_256_throughput_bps;
+	kstat_named_t sha2_256_requests_per_second;
 
 #if QAT_DIGEST_ENABLE_SHA3_256
 	/*
@@ -120,6 +120,7 @@ typedef struct qat_stats
 
 	/* sha3-256 throughput in bytes-per-sec */
 	kstat_named_t sha3_256_throughput_bps;
+	kstat_named_t sha3_256_requests_per_second;
 
 #endif
 	/* number of times unlocked instance was not available */
@@ -149,6 +150,7 @@ qat_stats_t qat_cy_stats = {
 		{ "sha2_256_total_out_bytes",		KSTAT_DATA_UINT64 },
 		{ "sha2_256_fails",			KSTAT_DATA_UINT64 },
 		{ "sha2_256_throughput_bps",		KSTAT_DATA_UINT64 },
+		{ "sha2_256_requests_per_second",	KSTAT_DATA_UINT64 },
 
 #if QAT_DIGEST_ENABLE_SHA3_256
 
@@ -158,6 +160,7 @@ qat_stats_t qat_cy_stats = {
 		{ "sha3_256_total_out_bytes",		KSTAT_DATA_UINT64 },
 		{ "sha3_256_fails",			KSTAT_DATA_UINT64 },
 		{ "sha3_256_throughput_bps",		KSTAT_DATA_UINT64 },
+		{ "sha3_256_requests_per_second",	KSTAT_DATA_UINT64 },
 
 #endif
 		{ "err_no_instance_available",		KSTAT_DATA_UINT64 },
@@ -186,6 +189,7 @@ typedef struct qat_instance_info
 	int instNum;
 } qat_instance_info_t;
 
+int zfs_qat_disable_cy_benchmark = 0;
 int zfs_qat_disable_sha2_256 = 0;
 #if QAT_DIGEST_ENABLE_SHA3_256
 int zfs_qat_disable_sha3_256 = 0;
@@ -207,8 +211,8 @@ static atomic_long_t noInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
 
-static spinlock_t instance_storage_lock;
 static spinlock_t next_instance_lock;
+static rwlock_t instance_storage_lock;
 static rwlock_t session_cache_lock;
 
 static spinlock_t throughput_sha2_256_lock;
@@ -218,6 +222,8 @@ static volatile struct timespec sha2_256Time = {0};
 static spinlock_t throughput_sha3_256_lock;
 static volatile struct timespec sha3_256Time = {0};
 #endif
+
+static struct timespec engineStarted = {0};
 
 #define	QAT_STAT_INCR(stat, val) \
 		atomic_add_64(&qat_cy_stats.stat.value.ui64, (val));
@@ -241,13 +247,13 @@ check_and_lock(const Cpa16U i)
 {
 	CpaBoolean ret = CPA_FALSE;
 
-	spin_lock(&instance_storage_lock);
+	write_lock(&instance_storage_lock);
 	if (likely(0 == atomic_read(&instance_lock[i])))
 	{
 		atomic_inc(&instance_lock[i]);
 		ret = CPA_TRUE;
 	}
-	spin_unlock(&instance_storage_lock);
+	write_unlock(&instance_storage_lock);
 
 	return (ret);
 }
@@ -255,15 +261,21 @@ check_and_lock(const Cpa16U i)
 static inline void
 unlock_instance(const Cpa16U i)
 {
-	spin_lock(&instance_storage_lock);
+	write_lock(&instance_storage_lock);
 	atomic_dec(&instance_lock[i]);
-	spin_unlock(&instance_storage_lock);
+	write_unlock(&instance_storage_lock);
 }
 
 static inline void
 updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 {
 	struct timespec ts;
+	struct timespec now;
+	struct timespec diff;
+
+	getnstimeofday(&now);
+	diff = timespec_sub(now, engineStarted);
+
 	jiffies_to_timespec(end - start, &ts);
 
 	spin_lock(&throughput_sha2_256_lock);
@@ -274,6 +286,11 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 		const uint64_t processed = qat_cy_stats.sha2_256_total_success_bytes.value.ui64;
 		atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, processed / sha2_256Time.tv_sec);
 	}
+	if (likely(diff.tv_sec > 0))
+	{
+		atomic_swap_64(&qat_cy_stats.sha2_256_requests_per_second.value.ui64,
+			qat_cy_stats.sha2_256_requests.value.ui64 / diff.tv_sec);
+	}
 
 	spin_unlock(&throughput_sha2_256_lock);
 }
@@ -283,6 +300,11 @@ static inline void
 updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 {
 	struct timespec ts;
+	struct timespec diff;
+
+	getnstimeofday(&now);
+	diff = timespec_sub(now, engineStarted);
+
 	jiffies_to_timespec(end - start, &ts);
 
 	spin_lock(&throughput_sha3_256_lock);
@@ -292,6 +314,11 @@ updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 	{
 		const uint64_t processed = qat_cy_stats.sha3_256_total_success_bytes.value.ui64;
 		atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, processed / sha3_256Time.tv_sec);
+	}
+	if (likely(diff.tv_sec > 0))
+	{
+		atomic_swap_64(&qat_cy_stats.sha3_256_requests_per_second.value.ui64,
+			qat_cy_stats.sha3_256_requests.value.ui64 / diff.tv_sec);
 	}
 
 	spin_unlock(&throughput_sha3_256_lock);
@@ -696,9 +723,10 @@ qat_digest_init(void)
 #endif
 
 	spin_lock_init(&next_instance_lock);
-	spin_lock_init(&instance_storage_lock);
+	rwlock_init(&instance_storage_lock);
 	rwlock_init(&session_cache_lock);
 
+	getnstimeofday(&engineStarted);
 	atomic_inc(&initialized);
 
 	if (CPA_STATUS_SUCCESS == cpaCyGetNumInstances(&numInstances) && numInstances > 0)
@@ -1377,7 +1405,8 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 		ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA256, src, src_len, dest);
 		if (likely(QAT_DIGEST_SUCCESS == ret))
 		{
-			updateThroughputSha2_256(start, jiffies);
+			if (!zfs_qat_disable_cy_benchmark)
+				updateThroughputSha2_256(start, jiffies);
 		}
 		break;
 
@@ -1387,7 +1416,8 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 		ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA3_256, src, src_len, dest);
 		if (likely(QAT_DIGEST_SUCCESS == ret))
 		{
-			updateThroughputSha3_256(start, jiffies);
+			if (!zfs_qat_disable_cy_benchmark)
+				updateThroughputSha3_256(start, jiffies);
 		}
 		break;
 #endif
@@ -1400,6 +1430,8 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 	return ret;
 }
 
+module_param(zfs_qat_disable_cy_benchmark, int, 0644);
+MODULE_PARM_DESC(zfs_qat_disable_cy_benchmark, "Disable digest benchmark");
 
 module_param(zfs_qat_disable_sha2_256, int, 0644);
 MODULE_PARM_DESC(zfs_qat_disable_sha2_256, "Disable SHA2-256 digest calculations");
