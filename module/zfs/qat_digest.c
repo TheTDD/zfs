@@ -212,13 +212,15 @@ static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
 static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
 
 static spinlock_t next_instance_lock;
-static rwlock_t instance_storage_lock;
+// static rwlock_t instance_storage_lock;
 static rwlock_t session_cache_lock;
 
+// static atomic_long_t lastSha2_256ThUpdate = ATOMIC_LONG_INIT(0);
 static spinlock_t throughput_sha2_256_lock;
 static volatile struct timespec sha2_256Time = {0};
 
 #if QAT_DIGEST_ENABLE_SHA3_256
+// static atomic_long_t lastSha3_256ThUpdate = ATOMIC_LONG_INIT(0);
 static spinlock_t throughput_sha3_256_lock;
 static volatile struct timespec sha3_256Time = {0};
 #endif
@@ -226,9 +228,9 @@ static volatile struct timespec sha3_256Time = {0};
 static struct timespec engineStarted = {0};
 
 #define	QAT_STAT_INCR(stat, val) \
-		atomic_add_64(&qat_cy_stats.stat.value.ui64, (val));
+		atomic_add_64(&qat_cy_stats.stat.value.ui64, (val))
 #define	QAT_STAT_BUMP(stat) \
-		QAT_STAT_INCR(stat, 1);
+		atomic_inc_64(&qat_cy_stats.stat.value.ui64)
 
 static inline int
 getNextInstance(const Cpa16U num_inst)
@@ -247,13 +249,15 @@ check_and_lock(const Cpa16U i)
 {
 	CpaBoolean ret = CPA_FALSE;
 
-	write_lock(&instance_storage_lock);
+	// write_lock(&instance_storage_lock);
+	smp_mb__before_atomic();
 	if (likely(0 == atomic_read(&instance_lock[i])))
 	{
 		atomic_inc(&instance_lock[i]);
 		ret = CPA_TRUE;
 	}
-	write_unlock(&instance_storage_lock);
+	smp_mb__after_atomic();
+	// write_unlock(&instance_storage_lock);
 
 	return (ret);
 }
@@ -261,9 +265,11 @@ check_and_lock(const Cpa16U i)
 static inline void
 unlock_instance(const Cpa16U i)
 {
-	write_lock(&instance_storage_lock);
+	// write_lock(&instance_storage_lock);
+	smp_mb__before_atomic();
 	atomic_dec(&instance_lock[i]);
-	write_unlock(&instance_storage_lock);
+	smp_mb__after_atomic();
+	// write_unlock(&instance_storage_lock);
 }
 
 static inline void
@@ -284,12 +290,12 @@ updateThroughputSha2_256(const uint64_t start, const uint64_t end)
 	if (likely(sha2_256Time.tv_sec > 0))
 	{
 		const uint64_t processed = qat_cy_stats.sha2_256_total_success_bytes.value.ui64;
-		atomic_swap_64(&qat_cy_stats.sha2_256_throughput_bps.value.ui64, processed / sha2_256Time.tv_sec);
+		qat_cy_stats.sha2_256_throughput_bps.value.ui64 = processed / sha2_256Time.tv_sec;
 	}
 	if (likely(diff.tv_sec > 0))
 	{
-		atomic_swap_64(&qat_cy_stats.sha2_256_requests_per_second.value.ui64,
-			qat_cy_stats.sha2_256_requests.value.ui64 / diff.tv_sec);
+		qat_cy_stats.sha2_256_requests_per_second.value.ui64 =
+			qat_cy_stats.sha2_256_requests.value.ui64 / diff.tv_sec;
 	}
 
 	spin_unlock(&throughput_sha2_256_lock);
@@ -313,12 +319,13 @@ updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 	if (likely(sha3_256Time.tv_sec > 0))
 	{
 		const uint64_t processed = qat_cy_stats.sha3_256_total_success_bytes.value.ui64;
-		atomic_swap_64(&qat_cy_stats.sha3_256_throughput_bps.value.ui64, processed / sha3_256Time.tv_sec);
+		qat_cy_stats.sha3_256_throughput_bps.value.ui64 =
+			processed / sha3_256Time.tv_sec;
 	}
 	if (likely(diff.tv_sec > 0))
 	{
-		atomic_swap_64(&qat_cy_stats.sha3_256_requests_per_second.value.ui64,
-			qat_cy_stats.sha3_256_requests.value.ui64 / diff.tv_sec);
+		qat_cy_stats.sha3_256_requests_per_second.value.ui64 =
+			qat_cy_stats.sha3_256_requests.value.ui64 / diff.tv_sec;
 	}
 
 	spin_unlock(&throughput_sha3_256_lock);
@@ -723,7 +730,7 @@ qat_digest_init(void)
 #endif
 
 	spin_lock_init(&next_instance_lock);
-	rwlock_init(&instance_storage_lock);
+	// rwlock_init(&instance_storage_lock);
 	rwlock_init(&session_cache_lock);
 
 	getnstimeofday(&engineStarted);
@@ -1134,12 +1141,15 @@ registerProcessedRequest(const CpaCySymHashAlgorithm algo, const int src_len, co
 }
 
 static qat_digest_status_t
-performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx sessionCtx, const CpaBoolean polled,
+performDigestOp(qat_instance_info_t *info, const CpaCySymSessionCtx sessionCtx,
 		const CpaCySymHashAlgorithm algo, const uint8_t *src, const int src_len, zio_cksum_t *dest)
 {
 	qat_digest_status_t ret = QAT_DIGEST_FAIL;
 	struct completion *pComplete = NULL;
 	unsigned long timeout = 0;
+
+	const CpaInstanceHandle cyInstHandle = info->cyInstHandle;
+	const CpaBoolean polled = info->polled;
 
 	CpaStatus status;
 	CpaCySymDpOpData *pOpData = NULL;
@@ -1256,7 +1266,7 @@ performDigestOp(const CpaInstanceHandle cyInstHandle, const CpaCySymSessionCtx s
 }
 
 static qat_digest_status_t
-qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymSessionCtx, const CpaBoolean, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
+qat_action( qat_digest_status_t (*func)(qat_instance_info_t*, const CpaCySymSessionCtx, const CpaCySymHashAlgorithm, const uint8_t*, const int, zio_cksum_t *),
 		const CpaCySymHashAlgorithm algo, const uint8_t* src, const int src_len, zio_cksum_t *dest)
 {
 	qat_digest_status_t ret = QAT_DIGEST_FAIL;
@@ -1332,9 +1342,8 @@ qat_action( qat_digest_status_t (*func)(const CpaInstanceHandle, const CpaCySymS
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		ret = (*func)(instances[instNum].cyInstHandle,
+		ret = (*func)(&instances[instNum],
 				sessionCtx,
-				instances[instNum].polled,
 				algo, src, src_len, dest);
 
 		/* Remove the session - session init has already succeeded */
@@ -1405,8 +1414,11 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 		ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA256, src, src_len, dest);
 		if (likely(QAT_DIGEST_SUCCESS == ret))
 		{
-			if (!zfs_qat_disable_cy_benchmark)
+			if (0 == zfs_qat_disable_cy_benchmark) // && jiffies_to_msecs(jiffies - atomic_long_read(&lastSha2_256ThUpdate)) > 1000)
+			{
 				updateThroughputSha2_256(start, jiffies);
+				// atomic_long_set(&lastSha2_256ThUpdate, jiffies);
+			}
 		}
 		break;
 
@@ -1416,8 +1428,11 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 		ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA3_256, src, src_len, dest);
 		if (likely(QAT_DIGEST_SUCCESS == ret))
 		{
-			if (!zfs_qat_disable_cy_benchmark)
+			if (0 == zfs_qat_disable_cy_benchmark) // && jiffies_to_msecs(jiffies - atomic_long_read(&lastSha3_256ThUpdate)) > 1000)
+			{
 				updateThroughputSha3_256(start, jiffies);
+				// atomic_long_set(&lastSha3_256ThUpdate, jiffies);
+			}
 		}
 		break;
 #endif
