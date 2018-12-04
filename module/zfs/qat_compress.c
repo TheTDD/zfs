@@ -274,13 +274,10 @@ static atomic_t initialized = ATOMIC_INIT(0);
 static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };
 static atomic_t current_instance_number = ATOMIC_INIT(-1);
 
-// static atomic_long_t lastCompThUpdate = ATOMIC_LONG_INIT(0);
-// static atomic_long_t lastDecompThUpdate = ATOMIC_LONG_INIT(0);
-
 static spinlock_t next_instance_lock;
 static spinlock_t compression_time_lock;
 static spinlock_t decompression_time_lock;
-// static rwlock_t instance_storage_lock;
+
 static rwlock_t session_cache_lock;
 static rwlock_t metadata_cache_lock;
 static rwlock_t bufferlistptr_cache_lock;
@@ -349,12 +346,12 @@ isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		// get type of instance, polled (1) or interrupt (0)
 		status = cpaDcInstanceGetInfo2(dcInstHandle, instanceInfo);
 	}
 
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
+		/* get type of instance, polled (1) or interrupt (0) */
 		*polled = instanceInfo->isPolled;
 	}
 
@@ -382,13 +379,11 @@ check_and_lock(const Cpa16U instanceNr)
 {
 	CpaBoolean ret = CPA_FALSE;
 
-	// write_lock(&instance_storage_lock);
 	smp_mb__before_atomic();
 	if (likely(0 == atomic_read(&instance_lock[instanceNr]))) {
 		atomic_inc(&instance_lock[instanceNr]);
 		ret = CPA_TRUE;
 	}
-	// write_unlock(&instance_storage_lock);
 	smp_mb__after_atomic();
 
 	return (ret);
@@ -397,11 +392,9 @@ check_and_lock(const Cpa16U instanceNr)
 static inline void
 unlock_instance(const Cpa16U instanceNr)
 {
-	// write_lock(&instance_storage_lock);
 	smp_mb__before_atomic();
 	atomic_dec(&instance_lock[instanceNr]);
 	smp_mb__after_atomic();
-	// write_unlock(&instance_storage_lock);
 }
 
 static inline void
@@ -1068,6 +1061,7 @@ getReadyInstanceInfo(const CpaInstanceHandle dcInstHandle, int instNum, qat_inst
 
 				if (likely(CPA_STATUS_SUCCESS == status))
 				{
+					// static cache
 					// status = PHYS_CONTIG_ALLOC(&info->bufferInterArray[bufferNum]->pBuffers, sizeof(CpaFlatBuffer));
 					status = CREATE_FLATBUFFER(&info->bufferInterArray[bufferNum]->pBuffers);
 				}
@@ -1178,7 +1172,7 @@ qat_compress_init(void)
 	status = VIRT_ALLOC(&instances, qatInfoSize);
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
-		// clean memory
+		/* clean memory */
 		memset(instances, 0, qatInfoSize);
 	}
 	else
@@ -1267,7 +1261,6 @@ qat_compress_init(void)
 	spin_lock_init(&compression_time_lock);
 	spin_lock_init(&decompression_time_lock);
 
-	// rwlock_init(&instance_storage_lock);
 	rwlock_init(&session_cache_lock);
 	rwlock_init(&metadata_cache_lock);
 	rwlock_init(&bufferlistptr_cache_lock);
@@ -1846,7 +1839,7 @@ compPerformOp(qat_instance_info_t *info, const CpaDcSessionHandle sessionHdl,
 		}
 	}
 
-	// submit operation
+	/* submit operation */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		pOpData->bufferLenToCompress = src_len;
@@ -1946,7 +1939,7 @@ compPerformOp(qat_instance_info_t *info, const CpaDcSessionHandle sessionHdl,
 		}
 	}
 
-	// generate footer
+	/* generate footer */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		/* generate footer into own buffer but updates pOpData->results */
@@ -2098,7 +2091,7 @@ decompPerformOp(qat_instance_info_t *info, const CpaDcSessionHandle sessionHdl,
 		}
 	}
 
-	// submit operation
+	/* submit operation */
 	if (likely(CPA_STATUS_SUCCESS == status))
 	{
 		pOpData->bufferLenToCompress = src_len - ZLIB_HEAD_SZ;
@@ -2280,7 +2273,7 @@ qat_action( qat_compress_status_t (*func)(qat_instance_info_t*, const CpaDcSessi
 		goto failed;
 	}
 
-	/* drop counter after successfull init */
+	/* reset counter after successfull init */
 	atomic_set(&numInitFailed, 0);
 
 	if (likely(CPA_STATUS_SUCCESS == status))
@@ -2365,10 +2358,6 @@ qat_action( qat_compress_status_t (*func)(qat_instance_info_t*, const CpaDcSessi
 		}
 	}
 
-	/*
-	 * Free up memory, stop the instance, etc.
-	 */
-
 	/* Free session Context */
 	DESTROY_SESSION(sessionHdl);
 
@@ -2376,7 +2365,6 @@ qat_action( qat_compress_status_t (*func)(qat_instance_info_t*, const CpaDcSessi
 	VIRT_FREE(pSd);
 
 	/* to have more free memory, unlock instance after cleaning */
-
 	unlock_instance(instNum);
 
 	return ret;
@@ -2419,10 +2407,9 @@ qat_compress(const qat_compress_dir_t dir, const int level, const char *src, con
 		if (likely(QAT_COMPRESS_SUCCESS == ret))
 		{
 			/* update stats once per second */
-			if (0 == zfs_qat_disable_dc_benchmark) //  && jiffies_to_msecs(jiffies - atomic_long_read(&lastCompThUpdate)) > 1000)
+			if (0 == zfs_qat_disable_dc_benchmark)
 			{
 				updateThroughputComp(start, jiffies);
-				// atomic_long_set(&lastCompThUpdate, jiffies);
 			}
 		}
 		break;
@@ -2431,10 +2418,9 @@ qat_compress(const qat_compress_dir_t dir, const int level, const char *src, con
 		ret = qat_action(decompPerformOp, level, src, src_len, dest, dest_len, c_len);
 		if (likely(QAT_COMPRESS_SUCCESS == ret))
 		{
-			if (0 == zfs_qat_disable_dc_benchmark) // && jiffies_to_msecs(jiffies-atomic_long_read(&lastDecompThUpdate)) > 1000)
+			if (0 == zfs_qat_disable_dc_benchmark)
 			{
 				updateThroughputDecomp(start, jiffies);
-				// atomic_long_set(&lastDecompThUpdate, jiffies);
 			}
 		}
 		break;

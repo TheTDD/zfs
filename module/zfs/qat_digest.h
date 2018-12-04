@@ -40,16 +40,10 @@ typedef enum qat_digest_type {
 
 #define QAT_DIGEST_ENABLE_SHA3_256	0
 
-extern int qat_digest_init(void);
+extern boolean_t qat_digest_init(void);
 extern void qat_digest_fini(void);
 extern boolean_t qat_digest_use_accel(const qat_digest_type_t type, const size_t s_len);
 extern qat_digest_status_t qat_digest(const qat_digest_type_t type, const uint8_t *src, const int size, zio_cksum_t *teml);
-
-/* Check for CY API version */
-#define CY_API_VERSION_AT_LEAST(major, minor)                                  \
-    (CPA_CY_API_VERSION_NUM_MAJOR > major ||                                   \
-         (CPA_CY_API_VERSION_NUM_MAJOR == major &&                                 \
-               CPA_CY_API_VERSION_NUM_MINOR >= minor))
 
 #else
 

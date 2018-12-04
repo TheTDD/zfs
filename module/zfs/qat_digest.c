@@ -34,6 +34,7 @@
 #include <icp_sal_poll.h>
 
 #include "qat_common.h"
+#include "qat_cy_common.h"
 #include "qat_digest.h"
 
 /*
@@ -45,11 +46,7 @@
 #undef kmem_cache_alloc
 #undef kmem_cache_free
 
-/*
- * Timeout - no response from hardware after 0.5 - 3 seconds
- */
-#define	TIMEOUT_MS_MIN		500
-#define TIMEOUT_MS_MAX		3000
+#define LOG_PREFIX "ZFS-QAT/digest: "
 
 /*
 Depending on the specifics of the particular algorithm and QAT API parameters, a
@@ -61,216 +58,26 @@ QAT software that can apply for requests of a certain size.
 #define	QAT_MIN_BUF_SIZE	(4*1024)
 #define	QAT_MAX_BUF_SIZE	(128*1024)
 
-#define LOG_PREFIX "ZFS-QAT/cy: "
-
-/*
- * Used for qat kstat.
- */
-typedef struct qat_stats
-{
-	/*
-	 * Number of times engine is failed to initialize.
-	 */
-	kstat_named_t init_failed;
-	/*
-	 * Number of jobs submitted to qat crypto engine.
-	 */
-	kstat_named_t sha2_256_requests;
-	/*
-	 * Total bytes sent to qat crypto engine.
-	 */
-	kstat_named_t sha2_256_total_in_bytes;
-	kstat_named_t sha2_256_total_success_bytes;
-	/*
-	 * Total bytes output from qat crypto engine.
-	 */
-	kstat_named_t sha2_256_total_out_bytes;
-
-	/*
-	 * Number of digest calculations fails in qat engine.
-	 * Note: when qat fail happens, it does mean a critical hardware
-	 * or software issue
-	 */
-	kstat_named_t sha2_256_fails;
-
-	/* sha2-235 throughput in bytes-per-sec */
-	kstat_named_t sha2_256_throughput_bps;
-	kstat_named_t sha2_256_requests_per_second;
-
-#if QAT_DIGEST_ENABLE_SHA3_256
-	/*
-	 * Number of jobs submitted to qat crypto engine.
-	 */
-	kstat_named_t sha3_256_requests;
-	/*
-	 * Total bytes sent to qat crypto engine.
-	 */
-	kstat_named_t sha3_256_total_in_bytes;
-	kstat_named_t sha3_256_total_success_bytes;
-	/*
-	 * Total bytes output from qat crypto engine.
-	 */
-	kstat_named_t sha3_256_total_out_bytes;
-	/*
-	 * Number of digest calculations fails in qat engine.
-	 * Note: failed decompression is the software issue or 
-	 * it does mean a critical hardwar issue.
-	 */
-	kstat_named_t sha3_256_fails;
-
-	/* sha3-256 throughput in bytes-per-sec */
-	kstat_named_t sha3_256_throughput_bps;
-	kstat_named_t sha3_256_requests_per_second;
-
-#endif
-	/* number of times unlocked instance was not available */
-	kstat_named_t err_no_instance_available;
-	kstat_named_t err_out_of_mem;
-
-	kstat_named_t err_timeout;
-
-	/* values of status error codes */
-	kstat_named_t err_status_fail;
-	kstat_named_t err_status_retry;
-	kstat_named_t err_status_param;
-	kstat_named_t err_status_resource;
-	// kstat_named_t err_status_baddata;
-	kstat_named_t err_status_restarting;
-	kstat_named_t err_status_unknown;
-
-} qat_stats_t;
-
-qat_stats_t qat_cy_stats = {
-
-		{ "init_failed",			KSTAT_DATA_UINT64 },
-
-		{ "sha2_256_requests",			KSTAT_DATA_UINT64 },
-		{ "sha2_256_total_in_bytes",		KSTAT_DATA_UINT64 },
-		{ "sha2_256_total_success_bytes",	KSTAT_DATA_UINT64 },
-		{ "sha2_256_total_out_bytes",		KSTAT_DATA_UINT64 },
-		{ "sha2_256_fails",			KSTAT_DATA_UINT64 },
-		{ "sha2_256_throughput_bps",		KSTAT_DATA_UINT64 },
-		{ "sha2_256_requests_per_second",	KSTAT_DATA_UINT64 },
-
-#if QAT_DIGEST_ENABLE_SHA3_256
-
-		{ "sha3_256_requests",			KSTAT_DATA_UINT64 },
-		{ "sha3_256_total_in_bytes",		KSTAT_DATA_UINT64 },
-		{ "sha3_256_total_success_bytes",	KSTAT_DATA_UINT64 },
-		{ "sha3_256_total_out_bytes",		KSTAT_DATA_UINT64 },
-		{ "sha3_256_fails",			KSTAT_DATA_UINT64 },
-		{ "sha3_256_throughput_bps",		KSTAT_DATA_UINT64 },
-		{ "sha3_256_requests_per_second",	KSTAT_DATA_UINT64 },
-
-#endif
-		{ "err_no_instance_available",		KSTAT_DATA_UINT64 },
-		{ "err_out_of_mem",			KSTAT_DATA_UINT64 },
-		{ "err_timeout",			KSTAT_DATA_UINT64 },
-
-		// from operations
-		{ "err_status_fail",                    KSTAT_DATA_UINT64 },
-		{ "err_status_retry",                   KSTAT_DATA_UINT64 },
-		{ "err_status_param",                   KSTAT_DATA_UINT64 },
-		{ "err_status_resource",                KSTAT_DATA_UINT64 },
-		{ "err_status_restarting",              KSTAT_DATA_UINT64 },
-		{ "err_status_unknown",                 KSTAT_DATA_UINT64 },
-
-};
-
-/* maximum number of Cy-Sym instances on one QAT controller */
-#define MAX_INSTANCES 128
-
-typedef struct qat_instance_info
-{
-	CpaInstanceHandle cyInstHandle;
-	CpaBoolean instanceStarted;
-	CpaBoolean instanceReady;
-	CpaBoolean polled;
-	int instNum;
-} qat_instance_info_t;
-
-int zfs_qat_disable_cy_benchmark = 0;
+int zfs_qat_disable_checksum_benchmark = 0;
 int zfs_qat_disable_sha2_256 = 0;
 #if QAT_DIGEST_ENABLE_SHA3_256
 int zfs_qat_disable_sha3_256 = 0;
 #endif
 
-static qat_instance_info_t *instances = NULL;
-
-static kstat_t *qat_ksp = NULL;
-static struct kmem_cache *opCache = NULL;
 static struct kmem_cache *sessionCache = NULL;
 static struct kmem_cache *bufferCache = NULL;
 
-static atomic_t numInitFailed = ATOMIC_INIT(0);
-static atomic_t initialized = ATOMIC_INIT(0);
-static atomic_t instance_lock[MAX_INSTANCES] = { ATOMIC_INIT(0) };
-static atomic_t current_instance_number = ATOMIC_INIT(-1);
-
-static atomic_long_t noInstanceMessageShown = ATOMIC_LONG_INIT(0);
-static atomic_long_t getInstanceMessageShown = ATOMIC_LONG_INIT(0);
-static atomic_long_t getInstanceFailed = ATOMIC_LONG_INIT(0);
-
-static spinlock_t next_instance_lock;
-// static rwlock_t instance_storage_lock;
 static rwlock_t session_cache_lock;
 
-// static atomic_long_t lastSha2_256ThUpdate = ATOMIC_LONG_INIT(0);
+static atomic_t numInitFailed = ATOMIC_INIT(0);
+
 static spinlock_t throughput_sha2_256_lock;
 static volatile struct timespec sha2_256Time = {0};
 
 #if QAT_DIGEST_ENABLE_SHA3_256
-// static atomic_long_t lastSha3_256ThUpdate = ATOMIC_LONG_INIT(0);
 static spinlock_t throughput_sha3_256_lock;
 static volatile struct timespec sha3_256Time = {0};
 #endif
-
-static struct timespec engineStarted = {0};
-
-#define	QAT_STAT_INCR(stat, val) \
-		atomic_add_64(&qat_cy_stats.stat.value.ui64, (val))
-#define	QAT_STAT_BUMP(stat) \
-		atomic_inc_64(&qat_cy_stats.stat.value.ui64)
-
-static inline int
-getNextInstance(const Cpa16U num_inst)
-{
-	int inst = 0;
-
-	spin_lock(&next_instance_lock);
-	inst = atomic_inc_return(&current_instance_number) % num_inst;
-	spin_unlock(&next_instance_lock);
-
-	return (inst);
-}
-
-static inline CpaBoolean
-check_and_lock(const Cpa16U i)
-{
-	CpaBoolean ret = CPA_FALSE;
-
-	// write_lock(&instance_storage_lock);
-	smp_mb__before_atomic();
-	if (likely(0 == atomic_read(&instance_lock[i])))
-	{
-		atomic_inc(&instance_lock[i]);
-		ret = CPA_TRUE;
-	}
-	smp_mb__after_atomic();
-	// write_unlock(&instance_storage_lock);
-
-	return (ret);
-}
-
-static inline void
-unlock_instance(const Cpa16U i)
-{
-	// write_lock(&instance_storage_lock);
-	smp_mb__before_atomic();
-	atomic_dec(&instance_lock[i]);
-	smp_mb__after_atomic();
-	// write_unlock(&instance_storage_lock);
-}
 
 static inline void
 updateThroughputSha2_256(const uint64_t start, const uint64_t end)
@@ -335,7 +142,7 @@ updateThroughputSha3_256(const uint64_t start, const uint64_t end)
 /************************************
  * dynamic kernel cache for sessions
  ************************************/
-static inline CpaStatus
+CpaStatus
 getReadySessionCache(const Cpa16U size)
 {
 	CpaStatus status = CPA_STATUS_FAIL;
@@ -356,7 +163,7 @@ getReadySessionCache(const Cpa16U size)
 		/* lock for writing and create, happens only once */
 		write_lock_irqsave(&session_cache_lock, flags);
 
-		sessionCache = kmem_cache_create("CpaCySessions",
+		sessionCache = kmem_cache_create("CpaDigestSessions",
 				size, DEFAULT_ALIGN_CACHE,
 				SLAB_TEMPORARY, NULL);
 		if (likely(NULL != sessionCache))
@@ -380,7 +187,7 @@ getReadySessionCache(const Cpa16U size)
   CpaCySymSessionCtx is already a pointer
   so it will be translated to void **
 */
-static inline CpaStatus
+CpaStatus
 CREATE_SESSION(CpaCySymSessionCtx *sessionCtx)
 {
 	CpaStatus status = CPA_STATUS_FAIL;
@@ -405,7 +212,7 @@ CREATE_SESSION(CpaCySymSessionCtx *sessionCtx)
 }
 
 #define DESTROY_SESSION(sessionCtx) _destroy_session(&(sessionCtx))
-static inline void
+void
 _destroy_session(CpaCySymSessionCtx *sessionCtx)
 {
 	if (likely(NULL != *sessionCtx))
@@ -418,46 +225,6 @@ _destroy_session(CpaCySymSessionCtx *sessionCtx)
 	}
 }
 
-/************************************
- * static kernel cache for opData
- ************************************/
-static inline CpaStatus
-CREATE_OPDATA(CpaCySymDpOpData **ptr)
-{
-	CpaStatus status = CPA_STATUS_FAIL;
-
-	*ptr = NULL;
-
-	if (likely(NULL != opCache))
-	{
-		void *result = kmem_cache_alloc(opCache, GFP_KERNEL);
-		if (likely(NULL != result))
-		{
-			*ptr = (CpaCySymDpOpData*)result;
-			status = CPA_STATUS_SUCCESS;
-		}
-		else
-		{
-			status = CPA_STATUS_RESOURCE;
-		}
-	}
-
-	return status;
-}
-
-#define DESTROY_OPDATA(pOpData) _destroy_opdata(&(pOpData))
-static inline void
-_destroy_opdata(CpaCySymDpOpData **ptr)
-{
-	if (likely(NULL != *ptr))
-	{
-		if (likely(NULL != opCache))
-		{
-			kmem_cache_free(opCache, *ptr);
-		}
-		*ptr = NULL;
-	}
-}
 
 /************************************
  * static kernel cache for input/output buffers
@@ -506,201 +273,10 @@ _destroy_buffer(Cpa8U **ptr)
 #define MAX_DIGEST_LENGTH SHA2_256_DIGEST_LENGTH
 #endif
 
-/* get type of instance, polled (1) or interrupt (0) */
-static CpaStatus
-isInstancePolled(const CpaInstanceHandle dcInstHandle, CpaBoolean *polled)
-{
-	CpaInstanceInfo2 *instanceInfo = NULL;
-	CpaStatus status;
-
-	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		*polled = instanceInfo->isPolled;
-	}
-
-	VIRT_FREE(instanceInfo);
-
-	return status;
-}
-
-/* Warning: allocate at least CPA_INST_NAME_SIZE + 1 bytes for instance name */
-static CpaStatus
-getInstanceName(const CpaInstanceHandle dcInstHandle, Cpa8U *instName)
-{
-	CpaInstanceInfo2 *instanceInfo = NULL;
-	CpaStatus status;
-
-	status = VIRT_ALLOC(&instanceInfo, sizeof(CpaInstanceInfo2));
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		status = cpaCyInstanceGetInfo2(dcInstHandle, instanceInfo);
-	}
-
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		strncpy(instName, instanceInfo->instName, CPA_INST_NAME_SIZE);
-	}
-
-	VIRT_FREE(instanceInfo);
-
-	return status;
-}
-
-static void
-qat_cy_callback_interrupt(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean verifyResult)
-{
-	if (likely(pOpData->pCallbackTag != NULL))
-	{
-		complete((struct completion *)pOpData->pCallbackTag);
-	}
-}
-
-static void
-qat_cy_callback_polled(CpaCySymDpOpData *pOpData, CpaStatus status, CpaBoolean verifyResult)
-{
-	pOpData->pCallbackTag = (void *)1;
-}
-
-static void
-releaseInstanceInfo(qat_instance_info_t *info)
-{
-	/* Clean up */
-	if (likely(info->instanceStarted))
-	{
-		cpaCyStopInstance(info->cyInstHandle);
-	}
-
-	info->instanceStarted = CPA_FALSE;
-	info->instanceReady = CPA_FALSE;
-}
-
-static CpaStatus
-getReadyInstanceInfo(const CpaInstanceHandle cyInstHandle, int instNum, qat_instance_info_t *info)
-{
-	CpaStatus status = CPA_STATUS_FAIL;
-	// CpaCyCapabilitiesInfo cap = {0};
-
-	/* check if instance is already started and ready */
-	if (info->instanceReady)
-	{
-		/* instance already started and ready to use,
-		   just return */
-		status = CPA_STATUS_SUCCESS;
-	}
-	else
-	{
-		/* Start Cryptographic instance */
-		status = cpaCyStartInstance(cyInstHandle);
-
-		if (likely(CPA_STATUS_SUCCESS == status))
-		{
-			info->cyInstHandle = cyInstHandle;
-			info->instNum = instNum;
-			info->instanceStarted = CPA_TRUE;
-		}
-/*
-#if 0
-    if (CPA_STATUS_SUCCESS == status)
-    {
-	status = cpaCyQueryCapabilities(cyInstHandle, &cap);
-	if (CPA_STATUS_SUCCESS != status)
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed to get instance capabilities (status=%d)\n", status);
-	}
-    }
-
-    if (CPA_STATUS_SUCCESS == status) {
-	if (!cap.symDpSupported)
-	{
-	    printk(KERN_CRIT LOG_PREFIX "unsupported functionality\n");
-    	    status = CPA_STATUS_FAIL;
-	}
-    }
-#endif
-*/
-		if (likely(CPA_STATUS_SUCCESS == status))
-		{
-			/*
-			 * Set the address translation function for the instance
-			 */
-			status = cpaCySetAddressTranslation(cyInstHandle, (void *)virt_to_phys);
-		}
-
-		if (likely(CPA_STATUS_SUCCESS == status))
-		{
-			status = isInstancePolled(cyInstHandle, &info->polled);
-		}
-
-		if (likely(CPA_STATUS_SUCCESS == status))
-		{
-			/* Register callback function for the instance depending on polling/interrupt */
-			if (likely(info->polled))
-			{
-				status = cpaCySymDpRegCbFunc(cyInstHandle, qat_cy_callback_polled);
-			}
-			else
-			{
-				status = cpaCySymDpRegCbFunc(cyInstHandle, qat_cy_callback_interrupt);
-			}
-		}
-
-		if (likely(CPA_STATUS_SUCCESS == status))
-		{
-			// printk(KERN_DEBUG LOG_PREFIX "instance %d is ready\n", info->instNum);
-			info->instanceReady = CPA_TRUE;
-		}
-	}
-
-	return (status);
-}
-
-static void
-cacheConstructor(void *pOpData)
-{
-	memset(pOpData, 0, sizeof(CpaCySymDpOpData));
-}
-
-int
+boolean_t
 qat_digest_init(void)
 {
-	Cpa16U numInstances = 0;
-	CpaStatus status = CPA_STATUS_SUCCESS;
-
-	int qatInfoSize = MAX_INSTANCES * sizeof(qat_instance_info_t);
-
-	status = VIRT_ALLOC(&instances, qatInfoSize);
-	if (likely(CPA_STATUS_SUCCESS == status))
-	{
-		// clean memory
-		memset(instances, 0, qatInfoSize);
-	}
-	else
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed to allocate instance cache storage (%d)\n",
-			qatInfoSize);
-		goto err;
-	}
-
-	opCache = kmem_cache_create("CpaCySymDpOpData",
-			sizeof(CpaCySymDpOpData),
-			8, SLAB_TEMPORARY|SLAB_CACHE_DMA,
-			cacheConstructor);
-	if (unlikely(NULL == opCache))
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed to allocate kernel cache for Op Data (%ld)\n",
-			sizeof(CpaCySymDpOpData));
-		goto err;
-	}
-
-	bufferCache = kmem_cache_create("CpaCyBuffers",
+	bufferCache = kmem_cache_create("CpaDigestBuffers",
 			QAT_MAX_BUF_SIZE + MAX_DIGEST_LENGTH,
 			DEFAULT_ALIGN_CACHE, SLAB_TEMPORARY, NULL);
 	if (unlikely(NULL == bufferCache))
@@ -710,76 +286,27 @@ qat_digest_init(void)
 		goto err;
 	}
 
-	/* install statistics at /proc/spl/kstat/zfs/qat-cy */
-	qat_ksp = kstat_create("zfs", 0, "qat-cy", "misc",
-			KSTAT_TYPE_NAMED, sizeof (qat_cy_stats) / sizeof (kstat_named_t),
-			KSTAT_FLAG_VIRTUAL);
-
-	if (unlikely(NULL == qat_ksp))
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed to allocate statistics\n");
-		goto err;
-	}
-
-	qat_ksp->ks_data = &qat_cy_stats;
-	kstat_install(qat_ksp);
+	rwlock_init(&session_cache_lock);
 
 	spin_lock_init(&throughput_sha2_256_lock);
 #if QAT_DIGEST_ENABLE_SHA3_256
 	spin_lock_init(&throughput_sha3_256_lock);
 #endif
 
-	spin_lock_init(&next_instance_lock);
-	// rwlock_init(&instance_storage_lock);
-	rwlock_init(&session_cache_lock);
-
-	getnstimeofday(&engineStarted);
-	atomic_inc(&initialized);
-
-	if (CPA_STATUS_SUCCESS == cpaCyGetNumInstances(&numInstances) && numInstances > 0)
-	{
-		printk(KERN_INFO LOG_PREFIX "started with %ld CY instances\n", min((long)numInstances,(long)MAX_INSTANCES));
-	}
-	else
-	{
-		printk(KERN_INFO LOG_PREFIX "initialized\n");
-	}
-
-	return 0;
+	return B_TRUE;
 
 err:
 
 	printk(KERN_ALERT LOG_PREFIX "initialization failed\n");
 
-	return 0;
+	return B_FALSE;
 }
 
 void
 qat_digest_fini(void)
 {
 	unsigned long flags;
-	int i;
-
-	if (likely(instances != NULL))
-	{
-		for (i = 0; i < MAX_INSTANCES; i++)
-		{
-			releaseInstanceInfo(&instances[i]);
-		}
-
-		VIRT_FREE(instances);
-	}
-
-	if (likely(NULL != qat_ksp))
-	{
-		atomic_dec(&initialized);
-
-		kstat_delete(qat_ksp);
-		qat_ksp = NULL;
-	}
-
-	/* initialized statically */
-	DESTROY_CACHE(opCache);
+    
 	DESTROY_CACHE(bufferCache);
 
 	/* initialized dynamically */
@@ -819,235 +346,6 @@ qat_digest_use_accel(const qat_digest_type_t dir, const size_t s_len)
 	return (ret);
 }
 
-static void
-register_error_status(const CpaStatus status)
-{
-	switch (status)
-	{
-	case CPA_STATUS_FAIL:
-		// Function failed.
-		QAT_STAT_BUMP(err_status_fail);
-		break;
-
-	case CPA_STATUS_RETRY:
-		// Resubmit the request.
-		QAT_STAT_BUMP(err_status_retry);
-		break;
-
-	case CPA_STATUS_INVALID_PARAM:
-		// Invalid parameter passed in.
-		QAT_STAT_BUMP(err_status_param);
-		break;
-
-	case CPA_STATUS_RESOURCE:
-		// Error related to system resources.
-		QAT_STAT_BUMP(err_status_resource);
-		break;
-
-	case CPA_STATUS_RESTARTING:
-		// API implementation is restarting. Resubmit the request.
-		QAT_STAT_BUMP(err_status_restarting);
-		break;
-
-		// TODO: add more constants if any
-
-	default:
-		QAT_STAT_BUMP(err_status_unknown);
-		break;
-	}
-}
-
-static inline uint32_t
-getTimeoutMs(const int dataSize, const int maxSize)
-{
-	uint32_t timeout = TIMEOUT_MS_MIN + (TIMEOUT_MS_MAX - TIMEOUT_MS_MIN) * dataSize / maxSize;
-	return timeout;
-}
-
-static CpaStatus
-waitForCompletion(const CpaInstanceHandle dcInstHandle, const CpaCySymDpOpData *pOpData, const CpaBoolean polled, const unsigned long timeoutMs)
-{
-	CpaStatus status = CPA_STATUS_SUCCESS;
-	Cpa8U *instanceName = NULL;
-
-	if (likely(polled))
-	{
-		/* Poll for responses. */
-		const unsigned long started = jiffies;
-
-		do
-		{
-			if (unlikely(jiffies_to_msecs(jiffies - started) > timeoutMs))
-			{
-				CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
-				if (likely(CPA_STATUS_SUCCESS == memStatus))
-				{
-					memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
-				}
-
-				if (likely(CPA_STATUS_SUCCESS == memStatus && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0))
-				{
-					printk(KERN_WARNING LOG_PREFIX "instance %s: timeout over %lu ms for polled engine\n", instanceName, timeoutMs);
-				}
-				else
-				{
-					printk(KERN_WARNING LOG_PREFIX "timeout over %lu ms for polled engine\n", timeoutMs);
-				}
-
-				VIRT_FREE(instanceName);
-
-				QAT_STAT_BUMP(err_timeout);
-				status = CPA_STATUS_FAIL;
-				break;
-			}
-
-			status = icp_sal_CyPollDpInstance(dcInstHandle, 1);
-		}
-		while (
-				((CPA_STATUS_SUCCESS == status) || (CPA_STATUS_RETRY == status))
-				&& (pOpData->pCallbackTag == (void *)0) );
-
-	}
-	else
-	{
-		struct completion *complete = (struct completion*)pOpData->pCallbackTag;
-
-		/* we now wait until the completion of the operation using interrupts */
-		if (unlikely(0 == wait_for_completion_interruptible_timeout(complete, msecs_to_jiffies(timeoutMs))))
-		{
-			CpaStatus memStatus = VIRT_ALLOC(&instanceName, CPA_INST_NAME_SIZE + 1);
-			if (likely(CPA_STATUS_SUCCESS == memStatus))
-			{
-				memset(instanceName, 0, CPA_INST_NAME_SIZE + 1);
-			}
-
-			if (likely(CPA_STATUS_SUCCESS == memStatus && CPA_STATUS_SUCCESS == getInstanceName(dcInstHandle, instanceName) && strlen(instanceName) > 0))
-			{
-				printk(KERN_WARNING LOG_PREFIX "instance %s: timeout over %lu ms for non-polled engine\n", instanceName, timeoutMs);
-			}
-			else
-			{
-				printk(KERN_WARNING LOG_PREFIX "timeout over %lu ms for non-polled engine\n", timeoutMs);
-			}
-
-			VIRT_FREE(instanceName);
-
-			QAT_STAT_BUMP(err_timeout);
-			status = CPA_STATUS_FAIL;
-		}
-	}
-
-	return status;
-}
-
-/*
- * Loading available DC instances and select next one
- */
-static CpaStatus
-getInstance(CpaInstanceHandle *instance, int *instanceNum)
-{
-	CpaStatus status = CPA_STATUS_SUCCESS;
-	Cpa16U num_inst = 0;
-	int inst = 0;
-	CpaBoolean instanceFound = CPA_FALSE;
-
-	CpaInstanceHandle *handles = NULL;
-
-	status = cpaCyGetNumInstances(&num_inst);
-	if (unlikely(status != CPA_STATUS_SUCCESS))
-	{
-		// show message once in a minute
-		if (jiffies_to_msecs(jiffies - atomic_long_read(&getInstanceFailed)) > 60L * 1000L)
-		{
-			printk(KERN_ALERT LOG_PREFIX "failed counting instances, num_failed=%d (status=%d)\n",
-					atomic_read(&numInitFailed), status);
-			atomic_long_set(&getInstanceFailed, jiffies);
-		}
-		goto done;
-	}
-	else
-	{
-		// return success but no instances configured
-		if (unlikely(num_inst == 0))
-		{
-			// show message once in a minute
-			if (jiffies_to_msecs(jiffies - atomic_long_read(&getInstanceMessageShown)) > 60L * 1000L)
-			{
-				printk(KERN_ALERT LOG_PREFIX "no instances found, please configure NumberCyInstances in [KERNEL_QAT] section\n");
-				atomic_long_set(&getInstanceMessageShown, jiffies);
-			}
-			goto done;
-		}
-	}
-
-	if (unlikely(num_inst > MAX_INSTANCES))
-	{
-		num_inst = MAX_INSTANCES;
-	}
-
-	status = VIRT_ALLOC(&handles, num_inst * sizeof(CpaInstanceHandle));
-	if (unlikely(status != CPA_STATUS_SUCCESS))
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed allocate space for instances, num_inst=%d (status=%d)\n", num_inst, status);
-		goto done;
-	}
-
-	status = cpaCyGetInstances(num_inst, handles);
-	if (unlikely(status != CPA_STATUS_SUCCESS))
-	{
-		printk(KERN_CRIT LOG_PREFIX "failed loading instances, num_inst=%d (status=%d)\n", num_inst, status);
-		goto done;
-	}
-
-	for (int i = 0; i < num_inst; i++)
-	{
-		inst = getNextInstance(num_inst);
-
-		if (check_and_lock(inst))
-		{
-			instanceFound = CPA_TRUE;
-			break;
-		}
-	}
-
-	if (unlikely(!instanceFound))
-	{
-		if (jiffies_to_msecs(jiffies - atomic_long_read(&noInstanceMessageShown)) > 60L * 1000L)
-		{
-			printk(KERN_WARNING LOG_PREFIX "failed to find free CY instance ouf of %d, consider to increase NumberCyInstances in [KERNEL_QAT] section\n", num_inst);
-			atomic_long_set(&noInstanceMessageShown, jiffies);
-		}
-
-		status = CPA_STATUS_RESOURCE;
-		QAT_STAT_BUMP(err_no_instance_available);
-	}
-	else
-	{
-		*instance = handles[inst];
-		*instanceNum = inst;
-	}
-
-done:
-
-	VIRT_FREE(handles);
-
-	return status;
-}
-
-static inline void
-symSessionWaitForInflightReq(CpaCySymSessionCtx pSessionCtx)
-{
-	/* Session in use is available since Cryptographic API version 2.2 */
-#if CY_API_VERSION_AT_LEAST(2, 2)
-	CpaBoolean sessionInUse = CPA_FALSE;
-	do
-	{
-		cpaCySymSessionInUse(pSessionCtx, &sessionInUse);
-
-	} while (sessionInUse);
-#endif
-	return;
-}
 
 static inline CpaStatus
 getDigestLength(const CpaCySymHashAlgorithm algo, Cpa32U *length)
@@ -1410,28 +708,26 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 	switch (type)
 	{
 	case QAT_DIGEST_SHA2_256:
-		// printk(KERN_DEBUG LOG_PREFIX "just info, requested to SHA2-256 %d bytes\n", src_len);
+
 		ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA256, src, src_len, dest);
 		if (likely(QAT_DIGEST_SUCCESS == ret))
 		{
-			if (0 == zfs_qat_disable_cy_benchmark) // && jiffies_to_msecs(jiffies - atomic_long_read(&lastSha2_256ThUpdate)) > 1000)
+			if (0 == zfs_qat_disable_checksum_benchmark)
 			{
 				updateThroughputSha2_256(start, jiffies);
-				// atomic_long_set(&lastSha2_256ThUpdate, jiffies);
 			}
 		}
 		break;
 
 #if QAT_DIGEST_ENABLE_SHA3_256
 	case QAT_DIGEST_SHA3_256:
-		// printk(KERN_DEBUG LOG_PREFIX "just info, requested to SHA3-256 %d bytes\n", src_len);
+
 		ret = qat_action(performDigestOp, CPA_CY_SYM_HASH_SHA3_256, src, src_len, dest);
 		if (likely(QAT_DIGEST_SUCCESS == ret))
 		{
-			if (0 == zfs_qat_disable_cy_benchmark) // && jiffies_to_msecs(jiffies - atomic_long_read(&lastSha3_256ThUpdate)) > 1000)
+			if (0 == zfs_qat_disable_checksum_benchmark)
 			{
 				updateThroughputSha3_256(start, jiffies);
-				// atomic_long_set(&lastSha3_256ThUpdate, jiffies);
 			}
 		}
 		break;
@@ -1445,8 +741,8 @@ qat_digest(const qat_digest_type_t type, const uint8_t *src, const int src_len, 
 	return ret;
 }
 
-module_param(zfs_qat_disable_cy_benchmark, int, 0644);
-MODULE_PARM_DESC(zfs_qat_disable_cy_benchmark, "Disable digest benchmark");
+module_param(zfs_qat_disable_checksum_benchmark, int, 0644);
+MODULE_PARM_DESC(zfs_qat_disable_checksum_benchmark, "Disable benchmark of checksum calculations");
 
 module_param(zfs_qat_disable_sha2_256, int, 0644);
 MODULE_PARM_DESC(zfs_qat_disable_sha2_256, "Disable SHA2-256 digest calculations");
