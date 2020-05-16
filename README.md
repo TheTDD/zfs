@@ -1,6 +1,8 @@
 # Updates to standard ZFS
 
-* For actual release for ZFS 0.7.12 - click [atomic release](https://github.com/TheTDD/zfs/tree/0.7.12-qat) or [fast release](https://github.com/TheTDD/zfs/tree/0.7.12-fast)
+* Actual release for ZFS 0.8.3
+
+* Outdated implementatons [atomic release](https://github.com/TheTDD/zfs/tree/0.7.12-qat) or [fast release](https://github.com/TheTDD/zfs/tree/0.7.12-fast)
 * Outdated implementation for ZFS 0.7.11 - click [here](https://github.com/TheTDD/zfs/tree/0.7.11-qat)
 
 ![img](http://zfsonlinux.org/images/zfs-linux.png)
