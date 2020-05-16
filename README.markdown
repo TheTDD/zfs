@@ -1,6 +1,6 @@
 # Release info
 
-This branch is build on [ZoL release 0.8.3](https://github.com/zfsonlinux/zfs/tree/zfs-0.8.3) and contains the completely new implementation of [Intel QuickAsssist](https://01.org/intel-quickassist-technology) Hardware support for GZIP filesystem compression and SHA2-256 (also SHA2-512 and SHA3-256 when it will needed) checksums. *QAT-Encryption is not implemented*.
+This branch is build on [ZoL release 0.8.3](https://github.com/zfsonlinux/zfs/tree/zfs-0.8.3) and contains the completely new implementation of [Intel QuickAsssist](https://01.org/intel-quickassist-technology) Hardware support for GZIP filesystem compression and SHA2-256 (also SHA2-512 and SHA3-256 when it will needed) checksums. *QAT-Encryption is not implemented yet because I have actually no usage for it*.
 
 The QAT implementation uses fast and simple [Data Plane DC API](https://01.org/sites/default/files/downloads/intelr-quickassist-technology/qadcapiv203public.pdf) and [Data Plane CySym API](https://01.org/sites/default/files/downloads/intelr-quickassist-technology/qacyapiv201public.pdf).
 
@@ -109,28 +109,28 @@ err_status_unknown              4    0
 This build of ZFS is since 2018-11-11 in production environment with 10TB ZFS-Pool:
 
 ```
-# zpool iostat -v
-                                                  capacity     operations     bandwidth 
-pool                                            alloc   free   read  write   read  write
-----------------------------------------------  -----  -----  -----  -----  -----  -----
-srv                                             5.88T  5.00T     21     80  1.27M  2.55M
-  mirror                                        2.51T  1.12T      9     25   538K   648K
-    ata-WDC_WD4002FYYZ-01B7CB0_K3GDHW1B             -      -      4     12   273K   324K
-    ata-WDC_WD4002FYYZ-01B7CB0_K4KGXS3B             -      -      5     12   266K   324K
-  mirror                                        3.31T   333G      6     26   441K   407K
-    ata-ST4000NM0035-1V4107_ZC12DB9P                -      -      3     13   219K   203K
-    ata-ST4000NM0035-1V4107_ZC12DAN7                -      -      3     13   221K   203K
-  mirror                                        68.4G  3.56T      5     16   318K   793K
-    ata-TOSHIBA_MG03ACA400_5387K02LF                -      -      3      9   170K   396K
-    ata-WDC_WD4000FYYZ-01UL1B1_WD-WCC130727209      -      -      2      7   148K   396K
-logs                                                -      -      -      -      -      -
-  cc52ce29-2cfc-4a6e-81af-04f055d3e23d           892K  1.98G      0     11      6   762K
-cache                                               -      -      -      -      -      -
-  nvme-INTEL_SSDPEKKW128G8_BTHH81850QJP128A      956M   118G      1      5  3.87K  22.7K
-----------------------------------------------  -----  -----  -----  -----  -----  -----
+[root@bg]# zpool iostat -v
+                                            capacity     operations     bandwidth
+pool                                      alloc   free   read  write   read  write
+----------------------------------------  -----  -----  -----  -----  -----  -----
+srv                                       6.84T  4.04T     91    192  3.21M  3.75M
+  mirror                                  2.25T  1.38T     33     62  1.10M  1.08M
+    ata-ST4000NM002A-2HZ101_WJG0GF73          -      -     16     33   590K   555K
+    ata-WDC_WD4002FYYZ-01B7CB0_K3GDHW1B       -      -     16     29   541K   555K
+  mirror                                  2.18T  1.44T     30     51  1.10M   983K
+    ata-ST4000NM0035-1V4107_ZC12DAN7          -      -     15     29   578K   491K
+    ata-TOSHIBA_MG04ACA400E_292GK90XFJKA      -      -     15     22   545K   491K
+  mirror                                  2.41T  1.22T     27     55  1.00M  1.03M
+    ata-WDC_WD4002FYYZ-01B7CB0_K4KGXS3B       -      -     13     26   482K   526K
+    ata-ST4000NM0035-1V4107_ZC12DB9P          -      -     13     29   546K   526K
+logs                                          -      -      -      -      -      -
+  cc52ce29-2cfc-4a6e-81af-04f055d3e23d    16.9M  1.97G      0     21     50   697K
+cache                                         -      -      -      -      -      -
+  nvme0n1                                 12.5M   119G      0      0     14  4.07K
+----------------------------------------  -----  -----  -----  -----  -----  -----
 ```
 
-Implementation of QAT encryption using Crypto Data Plane operations follows if I will find use of it. Please stay tuned.
+Implementation of QAT encryption using Crypto Data Plane operations follows if I will find use of it or by request. Please stay tuned.
 
 ![img](http://zfsonlinux.org/images/zfs-linux.png)
 
