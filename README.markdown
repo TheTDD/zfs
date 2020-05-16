@@ -1,6 +1,6 @@
 # Release info
 
-This branch is build on [ZoL release 0.8.3](https://github.com/zfsonlinux/zfs/tree/zfs-0.8.3) and contains the completely new implementation of [Intel QuickAsssist](https://01.org/intel-quickassist-technology) Hardware support for GZIP filesystem compression and SHA2-256 (also SHA2-512 and SHA3-256 when it will needed) checksums. *QAT-Encryption is not implemented yet because I have actually no usage for it*.
+This branch is build on [ZoL release 0.8.4](https://github.com/zfsonlinux/zfs/tree/zfs-0.8.4) and contains the completely new implementation of [Intel QuickAsssist](https://01.org/intel-quickassist-technology) Hardware support for GZIP filesystem compression and SHA2-256 (also SHA2-512 and SHA3-256 when it will needed) checksums. *QAT-Encryption is not implemented yet because I have actually no usage for it*.
 
 The QAT implementation uses fast and simple [Data Plane DC API](https://01.org/sites/default/files/downloads/intelr-quickassist-technology/qadcapiv203public.pdf) and [Data Plane CySym API](https://01.org/sites/default/files/downloads/intelr-quickassist-technology/qacyapiv201public.pdf).
 
