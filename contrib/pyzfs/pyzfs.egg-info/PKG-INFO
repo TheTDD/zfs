@@ -1,6 +1,6 @@
 Metadata-Version: 1.2
 Name: pyzfs
-Version: 0.8.3
+Version: 0.8.4
 Summary: Wrapper for libzfs_core
 Home-page: http://pyzfs.readthedocs.org
 Author: ClusterHQ
