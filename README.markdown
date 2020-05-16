@@ -130,7 +130,7 @@ cache                                               -      -      -      -      
 ----------------------------------------------  -----  -----  -----  -----  -----  -----
 ```
 
-Implementation of QAT encryption using Crypto Data Plane operations follows after zfs 0.8 goes to release. Please stay tuned.
+Implementation of QAT encryption using Crypto Data Plane operations follows if I will find use of it. Please stay tuned.
 
 ![img](http://zfsonlinux.org/images/zfs-linux.png)
 
