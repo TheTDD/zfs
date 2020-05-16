@@ -31,15 +31,20 @@
 . $STF_SUITE/include/libtest.shlib
 . $STF_SUITE/tests/functional/slog/slog.cfg
 
+function setup
+{
+	log_must rm -rf $VDIR $VDIR2
+	log_must mkdir -p $VDIR $VDIR2
+	log_must truncate -s $MINVDEVSIZE $VDEV $SDEV $LDEV $VDEV2 $SDEV2 $LDEV2
+
+	return 0
+}
+
 function cleanup
 {
-	if datasetexists $TESTPOOL ; then
-		log_must zpool destroy -f $TESTPOOL
-	fi
-	if datasetexists $TESTPOOL2 ; then
-		log_must zpool destroy -f $TESTPOOL2
-	fi
-	rm -rf $TESTDIR
+	poolexists $TESTPOOL && destroy_pool $TESTPOOL
+	poolexists $TESTPOOL2 && destroy_pool $TESTPOOL2
+	rm -rf $TESTDIR $VDIR $VDIR2
 }
 
 #
@@ -59,13 +64,14 @@ function display_status
 	((ret |= $?))
 
 	typeset mntpnt=$(get_prop mountpoint $pool)
-	dd if=/dev/random of=$mntpnt/testfile.$$ &
+	dd if=/dev/urandom of=$mntpnt/testfile.$$ &
 	typeset pid=$!
 
 	zpool iostat -v 1 3 > /dev/null
 	((ret |= $?))
 
 	kill -9 $pid
+	wait
 
 	return $ret
 }

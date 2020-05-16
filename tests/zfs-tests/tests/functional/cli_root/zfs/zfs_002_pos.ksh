@@ -62,7 +62,7 @@ log_assert "With ZFS_ABORT set, all zfs commands can abort and generate a " \
     "core file."
 log_onexit cleanup
 
-#preparation work for testing
+# Preparation work for testing
 corepath=$TESTDIR/core
 if [[ -d $corepath ]]; then
 	rm -rf $corepath
@@ -93,6 +93,7 @@ if is_linux; then
 	ulimit -c unlimited
 	echo "$corepath/core.zfs" >/proc/sys/kernel/core_pattern
 	echo 0 >/proc/sys/kernel/core_uses_pid
+	export ASAN_OPTIONS="abort_on_error=1:disable_coredump=0"
 else
 	log_must coreadm -p ${corepath}/core.%f
 fi

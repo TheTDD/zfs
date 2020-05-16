@@ -128,7 +128,7 @@ mkdirp(const char *d, mode_t mode)
  *		   caller, or NULL is returned on error.
  *
  *		   The caller should handle error reporting based upon the
- *		   returned vlaue, and should free the returned value,
+ *		   returned value, and should free the returned value,
  *		   when appropriate.
  */
 
@@ -166,7 +166,7 @@ simplify(const char *str)
 
 	mbPathlen = strlen(mbPath);
 
-	if ((wcPath = calloc(sizeof (wchar_t), mbPathlen+1)) == NULL) {
+	if ((wcPath = calloc(mbPathlen+1, sizeof (wchar_t))) == NULL) {
 		free(mbPath);
 		return (NULL);
 	}

@@ -63,7 +63,7 @@
  *
  * Returns:
  *	CRYPTO_SUCCESS when the context template is successfully created.
- *	CRYPTO_HOST_MEMEORY: mem alloc failure
+ *	CRYPTO_HOST_MEMORY: mem alloc failure
  *	CRYPTO_ARGUMENTS_BAD: NULL storage for the ctx template.
  *	RYPTO_MECHANISM_INVALID: invalid mechanism 'mech'.
  */
@@ -123,7 +123,7 @@ crypto_create_ctx_template(crypto_mechanism_t *mech, crypto_key_t *key,
  *		crypto_create_ctx_template()
  *
  * Description:
- *	Frees the inbedded crypto_spi_ctx_template_t, then the
+ *	Frees the embedded crypto_spi_ctx_template_t, then the
  *	kcf_ctx_template_t.
  *
  * Context:
@@ -145,7 +145,7 @@ crypto_destroy_ctx_template(crypto_ctx_template_t tmpl)
 	kmem_free(ctx_tmpl, sizeof (kcf_ctx_template_t));
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 EXPORT_SYMBOL(crypto_create_ctx_template);
 EXPORT_SYMBOL(crypto_destroy_ctx_template);
 #endif

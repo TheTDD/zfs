@@ -20,13 +20,12 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2015, 2018 by Delphix. All rights reserved.
  */
 
 
 #include <sys/types.h>
 #include <sys/param.h>
-#include <sys/systm.h>
 #include <sys/sysmacros.h>
 #include <sys/cmn_err.h>
 #include <sys/kmem.h>
@@ -43,9 +42,9 @@
 #include <sys/mode.h>
 #include <sys/acl.h>
 #include <sys/dmu.h>
+#include <sys/dbuf.h>
 #include <sys/spa.h>
 #include <sys/zfs_fuid.h>
-#include <sys/ddi.h>
 #include <sys/dsl_dataset.h>
 
 /*
@@ -166,8 +165,17 @@ zfs_log_xvattr(lr_attr_t *lrattr, xvattr_t *xvap)
 		    XAT0_AV_MODIFIED;
 	if (XVA_ISSET_REQ(xvap, XAT_CREATETIME))
 		ZFS_TIME_ENCODE(&xoap->xoa_createtime, crtime);
-	if (XVA_ISSET_REQ(xvap, XAT_AV_SCANSTAMP))
+	if (XVA_ISSET_REQ(xvap, XAT_AV_SCANSTAMP)) {
+		ASSERT(!XVA_ISSET_REQ(xvap, XAT_PROJID));
+
 		bcopy(xoap->xoa_av_scanstamp, scanstamp, AV_SCANSTAMP_SZ);
+	} else if (XVA_ISSET_REQ(xvap, XAT_PROJID)) {
+		/*
+		 * XAT_PROJID and XAT_AV_SCANSTAMP will never be valid
+		 * at the same time, so we can share the same space.
+		 */
+		bcopy(&xoap->xoa_projid, scanstamp, sizeof (uint64_t));
+	}
 	if (XVA_ISSET_REQ(xvap, XAT_REPARSE))
 		*attrs |= (xoap->xoa_reparse == 0) ? 0 :
 		    XAT0_REPARSE;
@@ -177,6 +185,9 @@ zfs_log_xvattr(lr_attr_t *lrattr, xvattr_t *xvap)
 	if (XVA_ISSET_REQ(xvap, XAT_SPARSE))
 		*attrs |= (xoap->xoa_sparse == 0) ? 0 :
 		    XAT0_SPARSE;
+	if (XVA_ISSET_REQ(xvap, XAT_PROJINHERIT))
+		*attrs |= (xoap->xoa_projinherit == 0) ? 0 :
+		    XAT0_PROJINHERIT;
 }
 
 static void *
@@ -370,12 +381,14 @@ zfs_log_create(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	zil_itx_assign(zilog, itx, tx);
 }
 
+void zil_remove_async(zilog_t *zilog, uint64_t oid);
+
 /*
  * Handles both TX_REMOVE and TX_RMDIR transactions.
  */
 void
 zfs_log_remove(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
-    znode_t *dzp, char *name, uint64_t foid)
+    znode_t *dzp, char *name, uint64_t foid, boolean_t unlinked)
 {
 	itx_t *itx;
 	lr_remove_t *lr;
@@ -391,6 +404,17 @@ zfs_log_remove(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 
 	itx->itx_oid = foid;
 
+	/*
+	 * Object ids can be re-instantiated in the next txg so
+	 * remove any async transactions to avoid future leaks.
+	 * This can happen if a fsync occurs on the re-instantiated
+	 * object for a WR_INDIRECT or WR_NEED_COPY write, which gets
+	 * the new file data and flushes a write record for the old object.
+	 */
+	if (unlinked) {
+		ASSERT((txtype & ~TX_CI) == TX_REMOVE);
+		zil_remove_async(zilog, foid);
+	}
 	zil_itx_assign(zilog, itx, tx);
 }
 
@@ -487,6 +511,7 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
     znode_t *zp, offset_t off, ssize_t resid, int ioflag,
     zil_callback_t callback, void *callback_data)
 {
+	dmu_buf_impl_t *db = (dmu_buf_impl_t *)sa_get_db(zp->z_sa_hdl);
 	uint32_t blocksize = zp->z_blksz;
 	itx_wr_state_t write_state;
 	uintptr_t fsync_cnt;
@@ -518,7 +543,14 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		itx_wr_state_t wr_state = write_state;
 		ssize_t len = resid;
 
-		if (wr_state == WR_COPIED && resid > ZIL_MAX_COPIED_DATA)
+		/*
+		 * A WR_COPIED record must fit entirely in one log block.
+		 * Large writes can use WR_NEED_COPY, which the ZIL will
+		 * split into multiple records across several log blocks
+		 * if necessary.
+		 */
+		if (wr_state == WR_COPIED &&
+		    resid > zil_max_copied_data(zilog))
 			wr_state = WR_NEED_COPY;
 		else if (wr_state == WR_INDIRECT)
 			len = MIN(blocksize - P2PHASE(off, blocksize), resid);
@@ -526,13 +558,16 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		itx = zil_itx_create(txtype, sizeof (*lr) +
 		    (wr_state == WR_COPIED ? len : 0));
 		lr = (lr_write_t *)&itx->itx_lr;
-		if (wr_state == WR_COPIED && dmu_read(ZTOZSB(zp)->z_os,
-		    zp->z_id, off, len, lr + 1, DMU_READ_NO_PREFETCH) != 0) {
+
+		DB_DNODE_ENTER(db);
+		if (wr_state == WR_COPIED && dmu_read_by_dnode(DB_DNODE(db),
+		    off, len, lr + 1, DMU_READ_NO_PREFETCH) != 0) {
 			zil_itx_destroy(itx);
 			itx = zil_itx_create(txtype, sizeof (*lr));
 			lr = (lr_write_t *)&itx->itx_lr;
 			wr_state = WR_NEED_COPY;
 		}
+		DB_DNODE_EXIT(db);
 
 		itx->itx_wr_state = wr_state;
 		lr->lr_foid = zp->z_id;
@@ -708,7 +743,7 @@ zfs_log_acl(zilog_t *zilog, dmu_tx_t *tx, znode_t *zp,
 	zil_itx_assign(zilog, itx, tx);
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 module_param(zfs_immediate_write_sz, long, 0644);
 MODULE_PARM_DESC(zfs_immediate_write_sz, "Largest data block to write to zil");
 #endif

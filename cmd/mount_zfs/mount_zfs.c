@@ -31,9 +31,11 @@
 #include <sys/mntent.h>
 #include <sys/stat.h>
 #include <libzfs.h>
+#include <libzutil.h>
 #include <locale.h>
 #include <getopt.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #define	ZS_COMMENT	0x00000000	/* comment */
 #define	ZS_ZFSUTIL	0x00000001	/* caller is zfs(8) */
@@ -487,7 +489,7 @@ main(int argc, char **argv)
 		zfsutil = 1;
 
 	if ((g_zfs = libzfs_init()) == NULL) {
-		(void) fprintf(stderr, "%s", libzfs_error_init(errno));
+		(void) fprintf(stderr, "%s\n", libzfs_error_init(errno));
 		return (MOUNT_SYSERR);
 	}
 

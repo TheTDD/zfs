@@ -32,7 +32,7 @@
 
 #ifdef _KERNEL
 
-#include <sys/systm.h>
+// #include <sys/systm.h>
 #include <sys/zmod.h>
 
 typedef size_t zlen_t;

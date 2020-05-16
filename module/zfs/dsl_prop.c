@@ -649,7 +649,7 @@ dsl_prop_set_sync_impl(dsl_dataset_t *ds, const char *propname,
     dmu_tx_t *tx)
 {
 	objset_t *mos = ds->ds_dir->dd_pool->dp_meta_objset;
-	uint64_t zapobj, intval, dummy;
+	uint64_t zapobj, intval, dummy, count;
 	int isint;
 	char valbuf[32];
 	const char *valstr = NULL;
@@ -663,7 +663,8 @@ dsl_prop_set_sync_impl(dsl_dataset_t *ds, const char *propname,
 
 	if (ds->ds_is_snapshot) {
 		ASSERT(version >= SPA_VERSION_SNAP_PROPS);
-		if (dsl_dataset_phys(ds)->ds_props_obj == 0) {
+		if (dsl_dataset_phys(ds)->ds_props_obj == 0 &&
+		    (source & ZPROP_SRC_NONE) == 0) {
 			dmu_buf_will_dirty(ds->ds_dbuf, tx);
 			dsl_dataset_phys(ds)->ds_props_obj =
 			    zap_create(mos,
@@ -673,6 +674,10 @@ dsl_prop_set_sync_impl(dsl_dataset_t *ds, const char *propname,
 	} else {
 		zapobj = dsl_dir_phys(ds->ds_dir)->dd_props_zapobj;
 	}
+
+	/* If we are removing objects from a non-existent ZAP just return */
+	if (zapobj == 0)
+		return;
 
 	if (version < SPA_VERSION_RECVD_PROPS) {
 		if (source & ZPROP_SRC_NONE)
@@ -754,6 +759,18 @@ dsl_prop_set_sync_impl(dsl_dataset_t *ds, const char *propname,
 
 	strfree(inheritstr);
 	strfree(recvdstr);
+
+	/*
+	 * If we are left with an empty snap zap we can destroy it.
+	 * This will prevent unnecessary calls to zap_lookup() in
+	 * the "zfs list" and "zfs get" code paths.
+	 */
+	if (ds->ds_is_snapshot &&
+	    zap_count(mos, zapobj, &count) == 0 && count == 0) {
+		dmu_buf_will_dirty(ds->ds_dbuf, tx);
+		dsl_dataset_phys(ds)->ds_props_obj = 0;
+		zap_destroy(mos, zapobj, tx);
+	}
 
 	if (isint) {
 		VERIFY0(dsl_prop_get_int_ds(ds, propname, &intval));
@@ -871,7 +888,7 @@ dsl_props_set_check(void *arg, dmu_tx_t *tx)
 			    SPA_VERSION_STMF_PROP ?
 			    ZAP_OLDMAXVALUELEN : ZAP_MAXVALUELEN)) {
 				dsl_dataset_rele(ds, FTAG);
-				return (E2BIG);
+				return (SET_ERROR(E2BIG));
 			}
 		}
 	}
@@ -963,7 +980,7 @@ typedef enum dsl_prop_getflags {
 	DSL_PROP_GET_INHERITING = 0x1,	/* searching parent of target ds */
 	DSL_PROP_GET_SNAPSHOT = 0x2,	/* snapshot dataset */
 	DSL_PROP_GET_LOCAL = 0x4,	/* local properties */
-	DSL_PROP_GET_RECEIVED = 0x8	/* received properties */
+	DSL_PROP_GET_RECEIVED = 0x8,	/* received properties */
 } dsl_prop_getflags_t;
 
 static int
@@ -1130,6 +1147,7 @@ dsl_prop_get_all_ds(dsl_dataset_t *ds, nvlist_t **nvp,
 		if (err)
 			break;
 	}
+
 out:
 	if (err) {
 		nvlist_free(*nvp);
@@ -1250,7 +1268,7 @@ dsl_prop_nvlist_add_string(nvlist_t *nv, zfs_prop_t prop, const char *value)
 	nvlist_free(propval);
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 EXPORT_SYMBOL(dsl_prop_register);
 EXPORT_SYMBOL(dsl_prop_unregister);
 EXPORT_SYMBOL(dsl_prop_unregister_all);

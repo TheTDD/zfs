@@ -20,11 +20,13 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2018 by Delphix. All rights reserved.
  */
 
 #ifndef	_SYS_FS_ZFS_VFSOPS_H
 #define	_SYS_FS_ZFS_VFSOPS_H
 
+#include <sys/dataset_kstats.h>
 #include <sys/isa_defs.h>
 #include <sys/types32.h>
 #include <sys/list.h>
@@ -44,7 +46,7 @@ struct znode;
 
 /*
  * This structure emulates the vfs_t from other platforms.  It's purpose
- * is to faciliate the handling of mount options and minimize structural
+ * is to facilitate the handling of mount options and minimize structural
  * differences between the platforms.
  */
 typedef struct vfs {
@@ -96,7 +98,6 @@ struct zfsvfs {
 	zfs_case_t	z_case;		/* case-sense */
 	boolean_t	z_utf8;		/* utf8-only */
 	int		z_norm;		/* normalization flags */
-	boolean_t	z_atime;	/* enable atimes mount option */
 	boolean_t	z_relatime;	/* enable relatime mount option */
 	boolean_t	z_unmounted;	/* unmounted */
 	rrmlock_t	z_teardown_lock;
@@ -104,7 +105,7 @@ struct zfsvfs {
 	list_t		z_all_znodes;	/* all znodes in the fs */
 	uint64_t	z_nr_znodes;	/* number of znodes in the fs */
 	unsigned long	z_rollback_time; /* last online rollback time */
-	unsigned long	z_snap_defer_time; /* last snapshot unmount deferal */
+	unsigned long	z_snap_defer_time; /* last snapshot unmount deferral */
 	kmutex_t	z_znodes_lock;	/* lock for z_all_znodes */
 	arc_prune_t	*z_arc_prune;	/* called by ARC to prune caches */
 	struct inode	*z_ctldir;	/* .zfs directory inode */
@@ -115,18 +116,24 @@ struct zfsvfs {
 	boolean_t	z_replay;	/* set during ZIL replay */
 	boolean_t	z_use_sa;	/* version allow system attributes */
 	boolean_t	z_xattr_sa;	/* allow xattrs to be stores as SA */
+	boolean_t	z_draining;	/* is true when drain is active */
+	boolean_t	z_drain_cancel; /* signal the unlinked drain to stop */
 	uint64_t	z_version;	/* ZPL version */
 	uint64_t	z_shares_dir;	/* hidden shares dir */
+	dataset_kstats_t	z_kstat;	/* fs kstats */
 	kmutex_t	z_lock;
 	uint64_t	z_userquota_obj;
 	uint64_t	z_groupquota_obj;
 	uint64_t	z_userobjquota_obj;
 	uint64_t	z_groupobjquota_obj;
+	uint64_t	z_projectquota_obj;
+	uint64_t	z_projectobjquota_obj;
 	uint64_t	z_replay_eof;	/* New end of file - replay only */
 	sa_attr_type_t	*z_attr_table;	/* SA attr mapping->id */
 	uint64_t	z_hold_size;	/* znode hold array size */
 	avl_tree_t	*z_hold_trees;	/* znode hold trees */
 	kmutex_t	*z_hold_locks;	/* znode hold locks */
+	taskqid_t	z_drain_task;	/* task id for the unlink drain task */
 };
 
 #define	ZSB_XATTR	0x0001		/* Enable user xattrs */
@@ -196,14 +203,15 @@ extern int zfs_userspace_many(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     uint64_t *cookiep, void *vbuf, uint64_t *bufsizep);
 extern int zfs_set_userquota(zfsvfs_t *zfsvfs, zfs_userquota_prop_t type,
     const char *domain, uint64_t rid, uint64_t quota);
-extern boolean_t zfs_owner_overquota(zfsvfs_t *zfsvfs, struct znode *,
-    boolean_t isgroup);
-extern boolean_t zfs_fuid_overquota(zfsvfs_t *zfsvfs, boolean_t isgroup,
-    uint64_t fuid);
-extern boolean_t zfs_fuid_overobjquota(zfsvfs_t *zfsvfs, boolean_t isgroup,
-    uint64_t fuid);
+extern boolean_t zfs_id_overblockquota(zfsvfs_t *zfsvfs, uint64_t usedobj,
+    uint64_t id);
+extern boolean_t zfs_id_overobjquota(zfsvfs_t *zfsvfs, uint64_t usedobj,
+    uint64_t id);
+extern boolean_t zfs_id_overquota(zfsvfs_t *zfsvfs, uint64_t usedobj,
+    uint64_t id);
 extern int zfs_set_version(zfsvfs_t *zfsvfs, uint64_t newvers);
-extern int zfsvfs_create(const char *name, zfsvfs_t **zfvp);
+extern int zfsvfs_create(const char *name, boolean_t readony, zfsvfs_t **zfvp);
+extern int zfsvfs_create_impl(zfsvfs_t **zfvp, zfsvfs_t *zfsvfs, objset_t *os);
 extern void zfsvfs_free(zfsvfs_t *zfsvfs);
 extern int zfs_check_global_label(const char *dsname, const char *hexsl);
 

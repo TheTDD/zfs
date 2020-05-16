@@ -48,7 +48,7 @@
  *	  The number returned need _not_ be between 0 and nchains.  The mod_hash
  *	  code will take care of doing that.  The second argument (after the
  *	  key) to the hashing function is a void * that represents
- *	  hash_alg_data-- this is provided so that the hashing algrorithm can
+ *	  hash_alg_data-- this is provided so that the hashing algorithm can
  *	  maintain some state across calls, or keep algorithm-specific
  *	  constants associated with the hash table.
  *
@@ -312,7 +312,7 @@ mod_hash_create_ptrhash(char *name, size_t nchains,
 	 * The high bits, which are also unused, will get taken out when
 	 * mod_hash takes hashkey % nchains.
 	 */
-	rshift = highbit(key_elem_size);
+	rshift = highbit64(key_elem_size);
 
 	return mod_hash_create_extended(name, nchains, mod_hash_null_keydtor,
 	    val_dtor, mod_hash_byptr, (void *)rshift, mod_hash_ptrkey_cmp,

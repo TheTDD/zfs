@@ -45,9 +45,6 @@ verify_runnable "both"
 
 function cleanup
 {
-	export __ZFS_POOL_RESTRICT="$POOL $POOL2"
-	log_must zfs unmount -a
-	unset __ZFS_POOL_RESTRICT
 	log_must cleanup_pool $POOL
 	log_must cleanup_pool $POOL2
 
@@ -66,7 +63,7 @@ for prop in $(fs_inherit_prop); do
 done
 
 #
-# Inherit propertes in sub-datasets
+# Inherit properties in sub-datasets
 #
 for ds in "$POOL/$FS/fs1" "$POOL/$FS/fs1/fs2" "$POOL/$FS/fs1/fclone" ; do
 	for prop in $(fs_inherit_prop) ; do

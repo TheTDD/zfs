@@ -41,7 +41,7 @@
 # STRATEGY:
 # 1. delete all devices in the swap
 # 2. create a zpool
-# 3. Verify the creation is successed.
+# 3. Verify the creation was successful
 #
 
 verify_runnable "global"
@@ -57,7 +57,7 @@ function cleanup
 	fi
 
 	#recover swap devices
-	FSTAB=/tmp/fstab_$$
+	FSTAB=$TEST_BASE_DIR/fstab_$$
 	rm -f $FSTAB
 	for sdisk in $swap_disks; do
 		echo "$sdisk	-	-	swap	-	no	-" >> $FSTAB

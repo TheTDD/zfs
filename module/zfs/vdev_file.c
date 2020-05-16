@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -28,10 +28,13 @@
 #include <sys/spa_impl.h>
 #include <sys/vdev_file.h>
 #include <sys/vdev_impl.h>
+#include <sys/vdev_trim.h>
 #include <sys/zio.h>
 #include <sys/fs/zfs.h>
 #include <sys/fm/fs/zfs.h>
 #include <sys/abd.h>
+#include <sys/fcntl.h>
+#include <sys/vnode.h>
 
 /*
  * Virtual device vector for files.
@@ -60,8 +63,23 @@ vdev_file_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	vattr_t vattr;
 	int error;
 
-	/* Rotational optimizations only make sense on block devices */
+	/*
+	 * Rotational optimizations only make sense on block devices.
+	 */
 	vd->vdev_nonrot = B_TRUE;
+
+	/*
+	 * Allow TRIM on file based vdevs.  This may not always be supported,
+	 * since it depends on your kernel version and underlying filesystem
+	 * type but it is always safe to attempt.
+	 */
+	vd->vdev_has_trim = B_TRUE;
+
+	/*
+	 * Disable secure TRIM on file based vdevs.  There is no way to
+	 * request this behavior from the underlying filesystem.
+	 */
+	vd->vdev_has_securetrim = B_FALSE;
 
 	/*
 	 * We must have a pathname, and it must be absolute.
@@ -229,6 +247,21 @@ vdev_file_io_start(zio_t *zio)
 
 		zio_execute(zio);
 		return;
+	} else if (zio->io_type == ZIO_TYPE_TRIM) {
+		struct flock flck;
+
+		ASSERT3U(zio->io_size, !=, 0);
+		bzero(&flck, sizeof (flck));
+		flck.l_type = F_FREESP;
+		flck.l_start = zio->io_offset;
+		flck.l_len = zio->io_size;
+		flck.l_whence = SEEK_SET;
+
+		zio->io_error = VOP_SPACE(vf->vf_vnode, F_FREESP, &flck,
+		    0, 0, kcred, NULL);
+
+		zio_execute(zio);
+		return;
 	}
 
 	zio->io_target_timestamp = zio_handle_io_delay(zio);
@@ -244,17 +277,19 @@ vdev_file_io_done(zio_t *zio)
 }
 
 vdev_ops_t vdev_file_ops = {
-	vdev_file_open,
-	vdev_file_close,
-	vdev_default_asize,
-	vdev_file_io_start,
-	vdev_file_io_done,
-	NULL,
-	NULL,
-	vdev_file_hold,
-	vdev_file_rele,
-	VDEV_TYPE_FILE,		/* name of this vdev type */
-	B_TRUE			/* leaf vdev */
+	.vdev_op_open = vdev_file_open,
+	.vdev_op_close = vdev_file_close,
+	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_io_start = vdev_file_io_start,
+	.vdev_op_io_done = vdev_file_io_done,
+	.vdev_op_state_change = NULL,
+	.vdev_op_need_resilver = NULL,
+	.vdev_op_hold = vdev_file_hold,
+	.vdev_op_rele = vdev_file_rele,
+	.vdev_op_remap = NULL,
+	.vdev_op_xlate = vdev_default_xlate,
+	.vdev_op_type = VDEV_TYPE_FILE,		/* name of this vdev type */
+	.vdev_op_leaf = B_TRUE			/* leaf vdev */
 };
 
 void
@@ -278,17 +313,19 @@ vdev_file_fini(void)
 #ifndef _KERNEL
 
 vdev_ops_t vdev_disk_ops = {
-	vdev_file_open,
-	vdev_file_close,
-	vdev_default_asize,
-	vdev_file_io_start,
-	vdev_file_io_done,
-	NULL,
-	NULL,
-	vdev_file_hold,
-	vdev_file_rele,
-	VDEV_TYPE_DISK,		/* name of this vdev type */
-	B_TRUE			/* leaf vdev */
+	.vdev_op_open = vdev_file_open,
+	.vdev_op_close = vdev_file_close,
+	.vdev_op_asize = vdev_default_asize,
+	.vdev_op_io_start = vdev_file_io_start,
+	.vdev_op_io_done = vdev_file_io_done,
+	.vdev_op_state_change = NULL,
+	.vdev_op_need_resilver = NULL,
+	.vdev_op_hold = vdev_file_hold,
+	.vdev_op_rele = vdev_file_rele,
+	.vdev_op_remap = NULL,
+	.vdev_op_xlate = vdev_default_xlate,
+	.vdev_op_type = VDEV_TYPE_DISK,		/* name of this vdev type */
+	.vdev_op_leaf = B_TRUE			/* leaf vdev */
 };
 
 #endif

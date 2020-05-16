@@ -35,7 +35,7 @@
 #
 # DESCRIPTION:
 # An archive of a zfs dataset and an archive of its snapshot
-# changed sinced the snapshot was taken.
+# changed since the snapshot was taken.
 #
 # STRATEGY:
 # 1) Create some files in a ZFS dataset
@@ -66,10 +66,6 @@ function cleanup
         if [[ -e $TESTDIR1 ]]; then
                 log_must rm -rf $TESTDIR1/* > /dev/null 2>&1
         fi
-
-	if [[ -e /tmp/zfs_snapshot2.$$ ]]; then
-		log_must rm -rf /tmp/zfs_snapshot2.$$ > /dev/null 2>&1
-	fi
 
 }
 

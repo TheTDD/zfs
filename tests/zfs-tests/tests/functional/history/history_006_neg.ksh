@@ -40,15 +40,10 @@
 # STRATEGY:
 #	1. Create a test pool.
 #	2. Separately invoke zfs list|get|holds|mount|unmount|share|unshare|send
-#	3. Verify they were not recored in pool history.
+#	3. Verify they were not recorded in pool history.
 #
 
 verify_runnable "global"
-
-# See issue: https://github.com/zfsonlinux/zfs/issues/5657
-if is_linux; then
-	log_unsupported "Test case occasionally fails"
-fi
 
 function cleanup
 {

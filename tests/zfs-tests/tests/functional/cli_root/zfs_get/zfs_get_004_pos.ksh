@@ -43,11 +43,6 @@
 
 verify_runnable "both"
 
-# See issue: https://github.com/zfsonlinux/zfs/issues/6145
-if is_linux; then
-	log_unsupported "Test case occasionally fails"
-fi
-
 function cleanup
 {
 	[[ -e $propfile ]] && rm -f $propfile
@@ -119,7 +114,7 @@ availspace=$(get_prop available $TESTPOOL)
 typeset -i i=0
 
 # make sure 'availspace' is larger then twice of FILESIZE to create a new pool.
-# If any, we only totally create 3 pools for multple datasets testing to limit
+# If any, we only totally create 3 pools for multiple datasets testing to limit
 # testing time
 while (( availspace > DFILESIZE )) && (( i < 3 )) ; do
 	(( i += 1 ))
@@ -161,7 +156,7 @@ done
 typeset -i fspropnum=27
 typeset -i snappropnum=8
 typeset -i volpropnum=15
-propfile=/var/tmp/allpropfile.$$
+propfile=$TEST_BASE_DIR/allpropfile.$$
 
 typeset -i i=0
 typeset -i propnum=0

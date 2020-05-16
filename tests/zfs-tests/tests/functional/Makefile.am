@@ -1,10 +1,13 @@
 SUBDIRS = \
 	acl \
+	alloc_class \
+	arc \
 	atime \
 	bootfs \
 	cache \
 	cachefile \
 	casenorm \
+	channel_program \
 	chattr \
 	checksum \
 	clean_mirror \
@@ -13,21 +16,24 @@ SUBDIRS = \
 	compression \
 	cp_files \
 	ctime \
+	deadman \
 	delegate \
 	devices \
 	events \
 	exec \
 	fault \
 	features \
-	grow_pool \
-	grow_replicas \
+	grow \
 	history \
+	hkdf \
 	inheritance \
 	inuse \
-	kstat \
+	io \
 	large_files \
 	largest_pool \
 	libzfs \
+	limits \
+	pyzfs \
 	link_count \
 	migration \
 	mmap \
@@ -38,17 +44,22 @@ SUBDIRS = \
 	no_space \
 	nopwrite \
 	online_offline \
+	pool_checkpoint \
 	pool_names \
 	poolversion \
 	privilege \
+	procfs \
+	projectquota \
 	quota \
 	raidz \
 	redundancy \
 	refquota \
 	refreserv \
+	removal \
 	rename_dirs \
 	replacement \
 	reservation \
+	resilver \
 	rootpool \
 	rsend \
 	scrub_mirror \
@@ -56,8 +67,10 @@ SUBDIRS = \
 	snapshot \
 	snapused \
 	sparse \
+	suid \
 	threadsappend \
 	tmpfile \
+	trim \
 	truncate \
 	upgrade \
 	user_namespace \

@@ -59,7 +59,7 @@ typedef int	kid_t;		/* unique kstat id */
  *	kcid = ioctl(kd, KSTAT_IOC_WRITE, kstat_t *);
  */
 
-#define	KSTAT_STRLEN	31	/* 30 chars + NULL; must be 16 * n - 1 */
+#define	KSTAT_STRLEN	255	/* 254 chars + NULL; must be 16 * n - 1 */
 
 /*
  * The generic kstat header
@@ -82,7 +82,7 @@ typedef struct kstat {
 	void		*ks_data;	/* kstat type-specific data */
 	uint_t		ks_ndata;	/* # of type-specific data records */
 	size_t		ks_data_size;	/* total size of kstat data section */
-	hrtime_t	ks_snaptime;	/* time of last data shapshot */
+	hrtime_t	ks_snaptime;	/* time of last data snapshot */
 	/*
 	 * Fields relevant to kernel only
 	 */

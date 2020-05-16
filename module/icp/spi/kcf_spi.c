@@ -40,7 +40,7 @@
  * minalloc and maxalloc values to be used for taskq_create().
  */
 int crypto_taskq_threads = CRYPTO_TASKQ_THREADS;
-int crypto_taskq_minalloc = CYRPTO_TASKQ_MIN;
+int crypto_taskq_minalloc = CRYPTO_TASKQ_MIN;
 int crypto_taskq_maxalloc = CRYPTO_TASKQ_MAX;
 
 static void remove_provider(kcf_provider_desc_t *);
@@ -111,7 +111,7 @@ int
 crypto_register_provider(crypto_provider_info_t *info,
     crypto_kcf_provider_handle_t *handle)
 {
-	char ks_name[KSTAT_STRLEN];
+	char *ks_name;
 
 	kcf_provider_desc_t *prov_desc = NULL;
 	int ret = CRYPTO_ARGUMENTS_BAD;
@@ -238,12 +238,12 @@ crypto_register_provider(crypto_provider_info_t *info,
 		 * This kstat is deleted, when the provider unregisters.
 		 */
 		if (prov_desc->pd_prov_type == CRYPTO_SW_PROVIDER) {
-			(void) snprintf(ks_name, KSTAT_STRLEN, "%s_%s",
+			ks_name = kmem_asprintf("%s_%s",
 			    "NONAME", "provider_stats");
 		} else {
-			(void) snprintf(ks_name, KSTAT_STRLEN, "%s_%d_%u_%s",
-			    "NONAME", 0,
-			    prov_desc->pd_prov_id, "provider_stats");
+			ks_name = kmem_asprintf("%s_%d_%u_%s",
+			    "NONAME", 0, prov_desc->pd_prov_id,
+			    "provider_stats");
 		}
 
 		prov_desc->pd_kstat = kstat_create("kcf", 0, ks_name, "crypto",
@@ -261,6 +261,7 @@ crypto_register_provider(crypto_provider_info_t *info,
 			prov_desc->pd_kstat->ks_update = kcf_prov_kstat_update;
 			kstat_install(prov_desc->pd_kstat);
 		}
+		strfree(ks_name);
 	}
 
 	if (prov_desc->pd_prov_type == CRYPTO_HW_PROVIDER)

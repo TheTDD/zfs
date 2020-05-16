@@ -121,11 +121,9 @@ multilist_create(size_t size, size_t offset,
 void
 multilist_destroy(multilist_t *ml)
 {
-	int i;
-
 	ASSERT(multilist_is_empty(ml));
 
-	for (i = 0; i < ml->ml_num_sublists; i++) {
+	for (int i = 0; i < ml->ml_num_sublists; i++) {
 		multilist_sublist_t *mls = &ml->ml_sublists[i];
 
 		ASSERT(list_is_empty(&mls->mls_list));
@@ -243,9 +241,7 @@ multilist_remove(multilist_t *ml, void *obj)
 int
 multilist_is_empty(multilist_t *ml)
 {
-	int i;
-
-	for (i = 0; i < ml->ml_num_sublists; i++) {
+	for (int i = 0; i < ml->ml_num_sublists; i++) {
 		multilist_sublist_t *mls = &ml->ml_sublists[i];
 		/* See comment in multilist_insert(). */
 		boolean_t need_lock = !MUTEX_HELD(&mls->mls_lock);
@@ -367,6 +363,28 @@ multilist_sublist_remove(multilist_sublist_t *mls, void *obj)
 	list_remove(&mls->mls_list, obj);
 }
 
+int
+multilist_sublist_is_empty(multilist_sublist_t *mls)
+{
+	ASSERT(MUTEX_HELD(&mls->mls_lock));
+	return (list_is_empty(&mls->mls_list));
+}
+
+int
+multilist_sublist_is_empty_idx(multilist_t *ml, unsigned int sublist_idx)
+{
+	multilist_sublist_t *mls;
+	int empty;
+
+	ASSERT3U(sublist_idx, <, ml->ml_num_sublists);
+	mls = &ml->ml_sublists[sublist_idx];
+	ASSERT(!MUTEX_HELD(&mls->mls_lock));
+	mutex_enter(&mls->mls_lock);
+	empty = list_is_empty(&mls->mls_list);
+	mutex_exit(&mls->mls_lock);
+	return (empty);
+}
+
 void *
 multilist_sublist_head(multilist_sublist_t *mls)
 {
@@ -407,7 +425,7 @@ multilist_link_active(multilist_node_t *link)
 	return (list_link_active(link));
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 
 /* BEGIN CSTYLED */
 

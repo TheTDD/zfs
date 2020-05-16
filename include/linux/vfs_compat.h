@@ -36,7 +36,7 @@
  * 2.6.28 API change,
  * Added insert_inode_locked() helper function, prior to this most callers
  * used insert_inode_hash().  The older method doesn't check for collisions
- * in the inode_hashtable but it still acceptible for use.
+ * in the inode_hashtable but it still acceptable for use.
  */
 #ifndef HAVE_INSERT_INODE_LOCKED
 static inline int
@@ -205,6 +205,10 @@ zpl_bdi_destroy(struct super_block *sb)
 
 #ifndef	SB_MANDLOCK
 #define	SB_MANDLOCK	MS_MANDLOCK
+#endif
+
+#ifndef	SB_NOATIME
+#define	SB_NOATIME	MS_NOATIME
 #endif
 
 /*

@@ -20,7 +20,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2016, Datto, Inc. All rights reserved.
+ * Copyright (c) 2017, Datto, Inc. All rights reserved.
  */
 
 #ifdef _KERNEL
@@ -93,7 +93,7 @@
  * will use the generic implementation.
  *
  * 7) Removing sha384 and sha512 code: The sha code was actually very
- * wasy to port. However, the generic sha384 and sha512 code actually
+ * easy to port. However, the generic sha384 and sha512 code actually
  * exceeds the stack size on arm and powerpc architectures. In an effort
  * to remove warnings, this code was removed.
  *
@@ -149,8 +149,10 @@ icp_init(void)
 	return (0);
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 module_exit(icp_fini);
 module_init(icp_init);
+MODULE_AUTHOR(ZFS_META_AUTHOR);
 MODULE_LICENSE(ZFS_META_LICENSE);
+MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
 #endif

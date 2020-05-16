@@ -36,7 +36,7 @@
 # DESCRIPTION:
 # An archive of a zfs file system and an archive of its snapshot
 # is identical even though the original file system has
-# changed sinced the snapshot was taken.
+# changed since the snapshot was taken.
 #
 # STRATEGY:
 # 1) Create files in all of the zfs file systems
@@ -67,10 +67,6 @@ function cleanup
         if [[ -e $TESTDIR ]]; then
                 log_must rm -rf $TESTDIR/* > /dev/null 2>&1
         fi
-
-	if [[ -e /tmp/zfs_snapshot2.$$ ]]; then
-		log_must rm -rf /tmp/zfs_snapshot2.$$ > /dev/null 2>&1
-	fi
 
 }
 

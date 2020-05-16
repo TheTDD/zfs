@@ -121,7 +121,7 @@ zfs_refcount_count(zfs_refcount_t *rc)
 }
 
 int64_t
-zfs_refcount_add_many(zfs_refcount_t *rc, uint64_t number, void *holder)
+zfs_refcount_add_many(zfs_refcount_t *rc, uint64_t number, const void *holder)
 {
 	reference_t *ref = NULL;
 	int64_t count;
@@ -143,13 +143,14 @@ zfs_refcount_add_many(zfs_refcount_t *rc, uint64_t number, void *holder)
 }
 
 int64_t
-zfs_refcount_add(zfs_refcount_t *rc, void *holder)
+zfs_refcount_add(zfs_refcount_t *rc, const void *holder)
 {
 	return (zfs_refcount_add_many(rc, 1, holder));
 }
 
 int64_t
-zfs_refcount_remove_many(zfs_refcount_t *rc, uint64_t number, void *holder)
+zfs_refcount_remove_many(zfs_refcount_t *rc, uint64_t number,
+    const void *holder)
 {
 	reference_t *ref;
 	int64_t count;
@@ -197,7 +198,7 @@ zfs_refcount_remove_many(zfs_refcount_t *rc, uint64_t number, void *holder)
 }
 
 int64_t
-zfs_refcount_remove(zfs_refcount_t *rc, void *holder)
+zfs_refcount_remove(zfs_refcount_t *rc, const void *holder)
 {
 	return (zfs_refcount_remove_many(rc, 1, holder));
 }
@@ -234,8 +235,8 @@ zfs_refcount_transfer(zfs_refcount_t *dst, zfs_refcount_t *src)
 }
 
 void
-zfs_refcount_transfer_ownership(zfs_refcount_t *rc, void *current_holder,
-    void *new_holder)
+zfs_refcount_transfer_ownership_many(zfs_refcount_t *rc, uint64_t number,
+    const void *current_holder, const void *new_holder)
 {
 	reference_t *ref;
 	boolean_t found = B_FALSE;
@@ -248,7 +249,8 @@ zfs_refcount_transfer_ownership(zfs_refcount_t *rc, void *current_holder,
 
 	for (ref = list_head(&rc->rc_list); ref;
 	    ref = list_next(&rc->rc_list, ref)) {
-		if (ref->ref_holder == current_holder) {
+		if (ref->ref_holder == current_holder &&
+		    ref->ref_number == number) {
 			ref->ref_holder = new_holder;
 			found = B_TRUE;
 			break;
@@ -258,13 +260,21 @@ zfs_refcount_transfer_ownership(zfs_refcount_t *rc, void *current_holder,
 	mutex_exit(&rc->rc_mtx);
 }
 
+void
+zfs_refcount_transfer_ownership(zfs_refcount_t *rc, const void *current_holder,
+    const void *new_holder)
+{
+	return (zfs_refcount_transfer_ownership_many(rc, 1, current_holder,
+	    new_holder));
+}
+
 /*
  * If tracking is enabled, return true if a reference exists that matches
  * the "holder" tag. If tracking is disabled, then return true if a reference
  * might be held.
  */
 boolean_t
-zfs_refcount_held(zfs_refcount_t *rc, void *holder)
+zfs_refcount_held(zfs_refcount_t *rc, const void *holder)
 {
 	reference_t *ref;
 
@@ -292,7 +302,7 @@ zfs_refcount_held(zfs_refcount_t *rc, void *holder)
  * since the reference might not be held.
  */
 boolean_t
-zfs_refcount_not_held(zfs_refcount_t *rc, void *holder)
+zfs_refcount_not_held(zfs_refcount_t *rc, const void *holder)
 {
 	reference_t *ref;
 

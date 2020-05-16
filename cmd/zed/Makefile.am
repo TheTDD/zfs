@@ -1,10 +1,10 @@
+SUBDIRS = zed.d
+
 include $(top_srcdir)/config/Rules.am
 
 DEFAULT_INCLUDES += \
 	-I$(top_srcdir)/include \
 	-I$(top_srcdir)/lib/libspl/include
-
-EXTRA_DIST = zed.d/README
 
 sbin_PROGRAMS = zed
 
@@ -40,55 +40,9 @@ FMA_SRC = \
 zed_SOURCES = $(ZED_SRC) $(FMA_SRC)
 
 zed_LDADD = \
-	$(top_builddir)/lib/libavl/libavl.la \
 	$(top_builddir)/lib/libnvpair/libnvpair.la \
-	$(top_builddir)/lib/libspl/libspl.la \
 	$(top_builddir)/lib/libuutil/libuutil.la \
-	$(top_builddir)/lib/libzpool/libzpool.la \
-	$(top_builddir)/lib/libzfs/libzfs.la \
-	$(top_builddir)/lib/libzfs_core/libzfs_core.la
+	$(top_builddir)/lib/libzfs/libzfs.la
 
-zed_LDFLAGS = -lrt -pthread
-
-zedconfdir = $(sysconfdir)/zfs/zed.d
-
-dist_zedconf_DATA = \
-	zed.d/zed-functions.sh \
-	zed.d/zed.rc
-
-zedexecdir = $(libexecdir)/zfs/zed.d
-
-dist_zedexec_SCRIPTS = \
-	zed.d/all-debug.sh \
-	zed.d/all-syslog.sh \
-	zed.d/data-notify.sh \
-	zed.d/generic-notify.sh \
-	zed.d/resilver_finish-notify.sh \
-	zed.d/scrub_finish-notify.sh \
-	zed.d/statechange-led.sh \
-	zed.d/statechange-notify.sh \
-	zed.d/vdev_clear-led.sh \
-	zed.d/vdev_attach-led.sh \
-	zed.d/pool_import-led.sh \
-	zed.d/resilver_finish-start-scrub.sh
-
-zedconfdefaults = \
-	all-syslog.sh \
-	data-notify.sh \
-	resilver_finish-notify.sh \
-	scrub_finish-notify.sh \
-	statechange-led.sh \
-	statechange-notify.sh \
-	vdev_clear-led.sh \
-	vdev_attach-led.sh \
-	pool_import-led.sh \
-	resilver_finish-start-scrub.sh
-
-install-data-hook:
-	$(MKDIR_P) "$(DESTDIR)$(zedconfdir)"
-	for f in $(zedconfdefaults); do \
-	  test -f "$(DESTDIR)$(zedconfdir)/$${f}" -o \
-	       -L "$(DESTDIR)$(zedconfdir)/$${f}" || \
-	    ln -s "$(zedexecdir)/$${f}" "$(DESTDIR)$(zedconfdir)"; \
-	done
-	chmod 0600 "$(DESTDIR)$(zedconfdir)/zed.rc"
+zed_LDADD += -lrt
+zed_LDFLAGS = -pthread

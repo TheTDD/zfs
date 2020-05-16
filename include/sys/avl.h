@@ -97,7 +97,7 @@ extern "C" {
  *
  * 3. Use avl_destroy_nodes() to quickly process/free up any remaining nodes.
  *    Note that once you use avl_destroy_nodes(), you can no longer
- *    use any routine except avl_destroy_nodes() and avl_destoy().
+ *    use any routine except avl_destroy_nodes() and avl_destroy().
  *
  * 4. Use avl_destroy() to destroy the AVL tree itself.
  *
@@ -144,7 +144,7 @@ typedef uintptr_t avl_index_t;
  * user data structure which must contain a field of type avl_node_t.
  *
  * Also assume the user data structures looks like:
- *	stuct my_type {
+ *	struct my_type {
  *		...
  *		avl_node_t	my_link;
  *		...
@@ -258,17 +258,6 @@ extern void avl_add(avl_tree_t *tree, void *node);
  * node   - the node to remove
  */
 extern void avl_remove(avl_tree_t *tree, void *node);
-
-/*
- * Reinsert a node only if its order has changed relative to its nearest
- * neighbors. To optimize performance avl_update_lt() checks only the previous
- * node and avl_update_gt() checks only the next node. Use avl_update_lt() and
- * avl_update_gt() only if you know the direction in which the order of the
- * node may change.
- */
-extern boolean_t avl_update(avl_tree_t *, void *);
-extern boolean_t avl_update_lt(avl_tree_t *, void *);
-extern boolean_t avl_update_gt(avl_tree_t *, void *);
 
 /*
  * Swaps the contents of the two trees.

@@ -30,15 +30,17 @@
 . $STF_SUITE/include/libtest.shlib
 . $STF_SUITE/tests/functional/xattr/xattr_common.kshlib
 
-del_user $ZFS_USER
-del_group $ZFS_GROUP
-
-USES_NIS=$(cat /tmp/zfs-xattr-test-nis.txt)
-rm /tmp/zfs-xattr-test-nis.txt
+USES_NIS=$(cat $TEST_BASE_DIR/zfs-xattr-test-nis.txt)
+rm $TEST_BASE_DIR/zfs-xattr-test-nis.txt
 
 if [ "${USES_NIS}" == "true" ]
 then
     svcadm enable svc:/network/nis/client:default
 fi
 
-default_cleanup
+default_cleanup_noexit
+
+del_user $ZFS_USER
+del_group $ZFS_GROUP
+
+log_pass

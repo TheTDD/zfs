@@ -46,7 +46,7 @@
  * terribly wasteful of bandwidth.  A more intelligent version of the cache
  * could keep track of access patterns and not do read-ahead unless it sees
  * at least two temporally close I/Os to the same region.  Currently, only
- * metadata I/O is inflated.  A futher enhancement could take advantage of
+ * metadata I/O is inflated.  A further enhancement could take advantage of
  * more semantic information about the I/O.  And it could use something
  * faster than an AVL tree; that was chosen solely for convenience.
  *
@@ -215,7 +215,6 @@ vdev_cache_fill(zio_t *fio)
 	vdev_cache_t *vc = &vd->vdev_cache;
 	vdev_cache_entry_t *ve = fio->io_private;
 	zio_t *pio;
-	zio_link_t *zl;
 
 	ASSERT3U(fio->io_size, ==, VCBS);
 
@@ -235,7 +234,7 @@ vdev_cache_fill(zio_t *fio)
 	 * any reads that were queued up before the missed update are still
 	 * valid, so we can satisfy them from this line before we evict it.
 	 */
-	zl = NULL;
+	zio_link_t *zl = NULL;
 	while ((pio = zio_walk_parents(fio, &zl)) != NULL)
 		vdev_cache_hit(vc, ve, pio);
 
@@ -426,7 +425,7 @@ vdev_cache_stat_fini(void)
 	}
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 module_param(zfs_vdev_cache_max, int, 0644);
 MODULE_PARM_DESC(zfs_vdev_cache_max, "Inflate reads small than max");
 

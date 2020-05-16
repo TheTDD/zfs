@@ -20,14 +20,13 @@
  */
 /*
  * Copyright (c) 2014 by Chunwei Chen. All rights reserved.
- * Copyright (c) 2016 by Delphix. All rights reserved.
+ * Copyright (c) 2016, 2019 by Delphix. All rights reserved.
  */
 
 #ifndef _ABD_H
 #define	_ABD_H
 
 #include <sys/isa_defs.h>
-#include <sys/int_types.h>
 #include <sys/debug.h>
 #include <sys/refcount.h>
 #ifdef _KERNEL
@@ -45,7 +44,8 @@ typedef enum abd_flags {
 	ABD_FLAG_OWNER	= 1 << 1,	/* does it own its data buffers? */
 	ABD_FLAG_META	= 1 << 2,	/* does this represent FS metadata? */
 	ABD_FLAG_MULTI_ZONE  = 1 << 3,	/* pages split over memory zones */
-	ABD_FLAG_MULTI_CHUNK = 1 << 4	/* pages split over multiple chunks */
+	ABD_FLAG_MULTI_CHUNK = 1 << 4,	/* pages split over multiple chunks */
+	ABD_FLAG_LINEAR_PAGE = 1 << 5,	/* linear but allocd from page */
 } abd_flags_t;
 
 typedef struct abd {
@@ -61,6 +61,7 @@ typedef struct abd {
 		} abd_scatter;
 		struct abd_linear {
 			void		*abd_buf;
+			struct scatterlist *abd_sgl; /* for LINEAR_PAGE */
 		} abd_linear;
 	} abd_u;
 } abd_t;
@@ -74,6 +75,13 @@ static inline boolean_t
 abd_is_linear(abd_t *abd)
 {
 	return ((abd->abd_flags & ABD_FLAG_LINEAR) != 0 ? B_TRUE : B_FALSE);
+}
+
+static inline boolean_t
+abd_is_linear_page(abd_t *abd)
+{
+	return ((abd->abd_flags & ABD_FLAG_LINEAR_PAGE) != 0 ?
+	    B_TRUE : B_FALSE);
 }
 
 /*
@@ -116,7 +124,7 @@ int abd_cmp(abd_t *, abd_t *);
 int abd_cmp_buf_off(abd_t *, const void *, size_t, size_t);
 void abd_zero_off(abd_t *, size_t, size_t);
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 unsigned int abd_scatter_bio_map_off(struct bio *, abd_t *, unsigned int,
 		size_t);
 unsigned long abd_nr_pages_off(abd_t *, unsigned int, size_t);

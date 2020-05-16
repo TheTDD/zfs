@@ -44,8 +44,8 @@
 
 #include <linux/simd_x86.h>
 #include <sys/spa_checksum.h>
+#include <sys/strings.h>
 #include <zfs_fletcher.h>
-#include <strings.h>
 
 static void
 fletcher_4_avx2_init(fletcher_4_ctx_t *ctx)
@@ -156,7 +156,7 @@ fletcher_4_avx2_byteswap(fletcher_4_ctx_t *ctx, const void *buf, uint64_t size)
 
 static boolean_t fletcher_4_avx2_valid(void)
 {
-	return (zfs_avx_available() && zfs_avx2_available());
+	return (kfpu_allowed() && zfs_avx_available() && zfs_avx2_available());
 }
 
 const fletcher_4_ops_t fletcher_4_avx2_ops = {
