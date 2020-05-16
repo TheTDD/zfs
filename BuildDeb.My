@@ -1,0 +1,11 @@
+#!/bin/sh
+
+export ICP_ROOT=/opt/QAT
+
+./configure \
+        --with-qat=$ICP_ROOT \
+        --with-config=srpm
+
+make -j1 pkg-utils deb-dkms
+
+exit

@@ -1,0 +1,8 @@
+#!/bin/sh
+
+export ICP_ROOT=/opt/QAT
+
+./configure \
+        --with-qat=$ICP_ROOT
+
+exit
